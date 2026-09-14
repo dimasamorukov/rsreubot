@@ -9,7 +9,7 @@ import re
 
 from parser import fetch_schedule_from_api, parse_schedule_for_day
 from database import (
-    get_user, add_homework, add_schedule_pair,
+    get_user, add_homework, add_schedule_pair, get_all_groups, 
     get_attendance_for_day_grouped,
     get_attendance_logs_week,
     delete_schedule_for_day, set_role, clear_schedule_for_group,
@@ -28,6 +28,10 @@ from keyboards import (
 from config import (
     ADMIN_IDS, get_current_week_type, get_week_type_for_date
 )
+
+from zoneinfo import ZoneInfo
+
+MSK = ZoneInfo("Europe/Moscow")
 
 router = Router()
 
@@ -280,8 +284,8 @@ async def hw_enter_deadline(message, state):
             await message.answer("❌ Неверный формат. Введи `ДД.ММ` (например `25.12`) или `-`.", parse_mode="Markdown")
             return
         day, month = int(match.group(1)), int(match.group(2))
-        year = datetime.now().year
-        if month < datetime.now().month:
+        year = datetime.now(MSK).year
+        if month < datetime.now(MSK).month:
             year += 1
         try:
             deadline = f"{year:04d}-{month:02d}-{day:02d}"
@@ -361,7 +365,7 @@ async def show_group_attendance(message):
     if not user or user[5] != 'starosta':
         return
     for offset, label in [(0, "сегодня"), (1, "завтра")]:
-        target = datetime.now() + timedelta(days=offset)
+        target = datetime.now(MSK) + timedelta(days=offset)
         target_date = target.strftime("%Y-%m-%d")
         date_display = target.strftime("%d.%m.%Y")
         rows = get_attendance_for_day_grouped(user[1], user[2], user[3], target_date)
@@ -598,7 +602,7 @@ async def update_schedule_from_api(message):
         await message.answer("⛔ Только староста может обновлять расписание.")
         return
     await message.answer("🔄 Загружаю расписание с сайта...")
-    today = datetime.now()
+    today = datetime.now(MSK)
     date_iso = today.strftime("%Y-%m-%d")
     data = await fetch_schedule_from_api(user[3], date_iso)
     if not data:
@@ -618,7 +622,8 @@ async def update_schedule_from_api(message):
             upsert_schedule_pair(
                 user[1], user[2], user[3], day_name, p["pair_number"],
                 p["subject"], p["teacher"], p["room"],
-                p["start_time"], p["end_time"], week_type=target_week
+                p["start_time"], p["end_time"], week_type=target_week,
+                lesson_type=p.get("lesson_type", "")
             )
             valid_keys.add((day_name, target_week, p["pair_number"]))
             if existing:
@@ -630,7 +635,6 @@ async def update_schedule_from_api(message):
         f"✅ Расписание обновлено!\n📚 Новых пар: **{saved}**\n♻️ Обновлено: **{updated}**\n🗑 Удалено: **{deleted}**",
         parse_mode="Markdown"
     )
-
 
 # ============ БЛОКИРОВКА ============
 
@@ -719,35 +723,6 @@ async def unban_command(message):
         await message.answer(f"✅ Пользователь `{target_id}` разбанен.", parse_mode="Markdown")
 
 
-@router.message(Command("banlist"))
-async def banlist_command(message):
-    if not _is_admin(message.from_user.id):
-        await message.answer("⛔ Только админ может смотреть список.")
-        return
-    banned = get_banned_users()
-    if not banned:
-        await message.answer("📋 Список забаненных пуст.")
-        return
-    text = f"📋 **Забаненные пользователи ({len(banned)}):**\n\n"
-    for ban_id, user_id, username, reason, banned_at in banned:
-        if user_id:
-            text += f"• ID: `{user_id}`"
-        if username:
-            if user_id:
-                text += f" | @{username}"
-            else:
-                text += f"• @{username}"
-        if reason:
-            text += f"\n  **Причина:** {reason}"
-        text += f"\n  _{banned_at[:16]}_\n\n"
-    text += "_Разбанить: `/unban <user_id>` или `/unban @username`_"
-    if len(text) > 4000:
-        for i in range(0, len(text), 4000):
-            await message.answer(text[i:i+4000], parse_mode="Markdown")
-    else:
-        await message.answer(text, parse_mode="Markdown")
-
-
 # ============ АДМИН: СПИСОК ВСЕХ ПОЛЬЗОВАТЕЛЕЙ ============
 
 from database import get_all_users, count_users, get_user_details
@@ -772,23 +747,51 @@ def _escape_html(text):
 
 
 def _format_user_row(user):
-    """Форматирует одну строку списка пользователей (HTML)"""
-    user_id, university, faculty, group_name, full_name, role, registered_at, notif = user
+    user_id = user[0]
+    group_name = user[3]
+    full_name = user[4]
+    role = user[5]
+    registered_at = user[6]
+    username = user[10] if len(user) > 10 else None
+
     role_icon = "👑" if role == "starosta" else "🎓"
     full_name_safe = _escape_html(full_name)
     group_safe = _escape_html(group_name or "")
-    return f"{role_icon} <b>{full_name_safe}</b>\n   <code>{user_id}</code> | {group_safe} | {registered_at[:10]}"
+
+    if username:
+        username_str = f"@{_escape_html(username)}"
+    else:
+        username_str = "<i>без username</i>"
+
+    return (
+        f"{role_icon} <b>{full_name_safe}</b>\n"
+        f"   {username_str}\n"
+        f"   🆔 <code>{user_id}</code> | {group_safe} | {registered_at[:10]}"
+    )
 
 
 def _format_user_details(user):
-    """Подробная информация о пользователе (HTML)"""
-    user_id, university, faculty, group_name, full_name, role, registered_at, notif = user
+    user_id = user[0]
+    university = user[1]
+    faculty = user[2]
+    group_name = user[3]
+    full_name = user[4]
+    role = user[5]
+    registered_at = user[6]
+    notif = user[7]
+    username = user[10] if len(user) > 10 else None
+
     role_text = "👑 Староста" if role == "starosta" else "🎓 Студент"
     notif_text = "🔔 Включены" if notif else "🔕 Отключены"
+    if username:
+        username_str = f"@{_escape_html(username)}"
+    else:
+        username_str = "<i>без username</i>"
 
     return (
         f"👤 <b>Информация о пользователе</b>\n\n"
         f"🆔 ID: <code>{user_id}</code>\n"
+        f"<b>Username:</b> {username_str}\n"
         f"<b>ФИО:</b> {_escape_html(full_name)}\n"
         f"<b>Роль:</b> {role_text}\n\n"
         f"🏛 <b>ВУЗ:</b> {_escape_html(university)}\n"
@@ -1448,3 +1451,115 @@ async def user_remove_starosta_start(callback: types.CallbackQuery):
         reply_markup=get_remove_starosta_confirm_kb(target_id)
     )
     await callback.answer()
+
+
+    # ============ АДМИН: ПОЛНОЕ ОБНОВЛЕНИЕ РАСПИСАНИЯ ============
+
+@router.message(Command("refresh_schedule"))
+async def cmd_refresh_schedule(message: types.Message):
+    """
+    Полное обновление расписания для ВСЕХ групп.
+    Обновляет только те пары, которые изменились — посещаемость сохраняется.
+    
+    Формат: /refresh_schedule
+    """
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ может запускать полное обновление.")
+        return
+
+    await message.answer("🔄 <b>Запускаю полное обновление расписания для всех групп...</b>\n\nЭто может занять 1–3 минуты.", parse_mode="HTML")
+
+    groups = get_all_groups()
+    if not groups:
+        await message.answer("📋 В базе нет групп — нечего обновлять.")
+        return
+
+    today = datetime.now(MSK)
+
+    total_groups = len(groups)
+    groups_success = 0
+    groups_failed = 0
+
+    total_saved = 0      # новых пар
+    total_updated = 0    # обновлённых
+    total_deleted = 0    # удалённых
+
+    failed_groups = []   # какие группы не удалось обновить
+
+    for university, faculty, group_name in groups:
+        try:
+            date_iso = today.strftime("%Y-%m-%d")
+            data = await fetch_schedule_from_api(group_name, date_iso)
+
+            if not data:
+                groups_failed += 1
+                failed_groups.append(group_name)
+                print(f"[refresh_schedule] ❌ Не удалось получить расписание для {group_name}")
+                continue
+
+            saved = 0
+            updated = 0
+            valid_keys = set()
+
+            for offset in range(14):
+                target = today + timedelta(days=offset)
+                day_name = DAYS_RU[target.weekday()]
+                target_iso = target.strftime("%Y-%m-%d")
+                target_week = get_week_type_for_date(target.date())
+
+                pairs = parse_schedule_for_day(data, target_iso, target_week)
+                for p in pairs:
+                    existing = get_schedule_pair_by_key(
+                        university, faculty, group_name,
+                        day_name, target_week, p["pair_number"]
+                    )
+
+                    upsert_schedule_pair(
+                        university, faculty, group_name,
+                        day_name, p["pair_number"], p["subject"],
+                        p["teacher"], p["room"], p["start_time"], p["end_time"],
+                        week_type=target_week,
+                        lesson_type=p.get("lesson_type", "")
+                    )
+                    valid_keys.add((day_name, target_week, p["pair_number"]))
+
+                    if existing:
+                        updated += 1
+                    else:
+                        saved += 1
+
+            deleted = delete_orphan_schedule_pairs(
+                university, faculty, group_name, valid_keys
+            )
+
+            total_saved += saved
+            total_updated += updated
+            total_deleted += deleted
+            groups_success += 1
+
+            print(f"[refresh_schedule]   ✅ {group_name}: новых {saved}, обновлено {updated}, удалено {deleted}")
+
+        except Exception as e:
+            groups_failed += 1
+            failed_groups.append(group_name)
+            print(f"[refresh_schedule]   ❌ Ошибка для {group_name}: {e}")
+
+    # Формируем отчёт
+    text = (
+        f"✅ <b>Полное обновление расписания завершено</b>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"👥 Групп обработано: <b>{groups_success}</b> из <b>{total_groups}</b>\n"
+        f"📚 Новых пар: <b>{total_saved}</b>\n"
+        f"♻️ Обновлено пар: <b>{total_updated}</b>\n"
+        f"🗑 Удалено пар: <b>{total_deleted}</b>\n"
+    )
+
+    if groups_failed > 0:
+        text += f"\n⚠️ <b>Не удалось обновить:</b> {groups_failed} групп\n"
+        # Показываем первые 10 проблемных групп
+        preview = ", ".join(failed_groups[:10])
+        if len(failed_groups) > 10:
+            preview += f" и ещё {len(failed_groups) - 10}"
+        text += f"<i>{preview}</i>"
+
+    await message.answer(text, parse_mode="HTML")

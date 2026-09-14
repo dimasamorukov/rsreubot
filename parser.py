@@ -10,6 +10,16 @@ DAYS_RU = {
 
 DAY_EN = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
+# Расшифровка типов занятий
+LESSON_TYPE_NAMES = {
+    "Лек.": "Лекция",
+    "Лаб.": "Лабораторная",
+    "Упр.": "Практика",
+    "Пр.": "Практика",
+    "Сем.": "Семинар",
+    "Курс.": "Курсовая",
+}
+
 
 async def fetch_schedule_from_api(group_name: str, date: str = None) -> dict:
     """
@@ -42,19 +52,6 @@ async def fetch_schedule_from_api(group_name: str, date: str = None) -> dict:
 def parse_schedule_for_day(data: dict, target_date: str, week_type: str) -> list:
     """
     Извлекает расписание на конкретный день из ответа API.
-    Возвращает список пар:
-    [
-        {
-            "pair_number": 1,
-            "subject": "Математика",
-            "teacher": "доц. Бодрова И.В.",
-            "room": "465 C",
-            "start_time": "08:10",
-            "end_time": "09:45",
-            "lesson_type": "Лек."
-        },
-        ...
-    ]
     """
     if not data or "schedule" not in data:
         return []
@@ -160,15 +157,21 @@ def format_schedule_for_message(pairs: list, day_name: str, week_type: str, date
 
     for p in pairs:
         text += f"**{p['pair_number']} пара** ({p['start_time']}–{p['end_time']})\n"
-        if p['lesson_type']:
-            text += f"{p['lesson_type']} "
-        text += f"{p['subject']}\n"
+
+        # Расшифровка типа занятия: "Лек." → "Лекция"
+        lesson_type = p.get('lesson_type') or ""
+        lesson_type_full = LESSON_TYPE_NAMES.get(lesson_type, lesson_type)
+
+        if lesson_type_full:
+            text += f"📌 {lesson_type_full}\n"
+
+        text += f"📖 {p['subject']}\n"
+
         if p['teacher']:
-            text += f"👤 {p['teacher']}"
+            text += f"👤 {p['teacher']}\n"
         if p['room']:
-            text += f" | 🚪 {p['room']}"
-        if p['teacher'] or p['room']:
-            text += "\n"
+            text += f"🚪 {p['room']}\n"
+
         text += "➖➖➖➖➖\n"
 
     return text

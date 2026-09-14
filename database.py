@@ -1,6 +1,9 @@
 import sqlite3
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+MSK = ZoneInfo("Europe/Moscow")
 
 DATA_DIR = "/app/data"
 DB_NAME = os.path.join(DATA_DIR, "rsreu_bot.db")
@@ -20,7 +23,10 @@ def init_db():
             full_name TEXT,
             role TEXT DEFAULT 'student',
             registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            notifications_enabled INTEGER DEFAULT 1
+            notifications_enabled INTEGER DEFAULT 1,
+            notify_pairs INTEGER DEFAULT 1,
+            notify_attendance INTEGER DEFAULT 1,
+            username TEXT
         )
     """)
 
@@ -38,7 +44,8 @@ def init_db():
             room TEXT,
             start_time TEXT,
             end_time TEXT,
-            file_id TEXT
+            file_id TEXT,
+            lesson_type TEXT
         )
     """)
 
@@ -100,27 +107,63 @@ def init_db():
         )
     """)
 
+    # Миграции
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN notify_pairs INTEGER DEFAULT 1")
+        print("✅ Миграция: добавлена колонка notify_pairs")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN notify_attendance INTEGER DEFAULT 1")
+        print("✅ Миграция: добавлена колонка notify_attendance")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        print("✅ Миграция: добавлена колонка username")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE schedule ADD COLUMN lesson_type TEXT")
+        print("✅ Миграция: добавлена колонка lesson_type")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
 
 # ============ ПОЛЬЗОВАТЕЛИ ============
 
-def register_user(user_id, university, faculty, group_name, full_name):
+def register_user(user_id, university, faculty, group_name, full_name, username=None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT OR REPLACE INTO users (user_id, university, faculty, group_name, full_name)
-        VALUES (?, ?, ?, ?, ?)
-    """, (user_id, university, faculty, group_name, full_name))
+        INSERT OR REPLACE INTO users (user_id, university, faculty, group_name, full_name, username)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (user_id, university, faculty, group_name, full_name, username))
     conn.commit()
     conn.close()
 
 
 def get_user(user_id):
+    """
+    Возвращает строку со всеми полями в порядке:
+    0 user_id, 1 university, 2 faculty, 3 group_name, 4 full_name,
+    5 role, 6 registered_at, 7 notifications_enabled,
+    8 notify_pairs, 9 notify_attendance, 10 username
+    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("""
+        SELECT user_id, university, faculty, group_name, full_name, role,
+               registered_at, notifications_enabled, notify_pairs,
+               notify_attendance, username
+        FROM users WHERE user_id = ?
+    """, (user_id,))
     row = cursor.fetchone()
     conn.close()
     return row
@@ -154,13 +197,26 @@ def get_group_users(university, faculty, group_name):
     return rows
 
 
-def get_users_with_notifications(university, faculty, group_name):
+def get_users_for_pair_notifications(university, faculty, group_name):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         SELECT user_id, full_name FROM users
         WHERE university = ? AND faculty = ? AND group_name = ?
-          AND (notifications_enabled IS NULL OR notifications_enabled = 1)
+          AND (notify_pairs IS NULL OR notify_pairs = 1)
+    """, (university, faculty, group_name))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_users_for_attendance_broadcast(university, faculty, group_name):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT user_id, full_name FROM users
+        WHERE university = ? AND faculty = ? AND group_name = ?
+          AND (notify_attendance IS NULL OR notify_attendance = 1)
     """, (university, faculty, group_name))
     rows = cursor.fetchall()
     conn.close()
@@ -212,10 +268,6 @@ def set_role(user_id, role):
 
 
 def remove_starosta(user_id):
-    """
-    Снимает роль старосты с пользователя.
-    Возвращает (True, full_name, group_name) если снял, (False, None, None) если не староста.
-    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT full_name, group_name, role FROM users WHERE user_id = ?", (user_id,))
@@ -233,10 +285,10 @@ def remove_starosta(user_id):
     return (True, full_name, group_name)
 
 
-def get_notifications_enabled(user_id):
+def get_notify_pairs(user_id):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT notifications_enabled FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT notify_pairs FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
     if not row or row[0] is None:
@@ -244,30 +296,76 @@ def get_notifications_enabled(user_id):
     return bool(row[0])
 
 
-def set_notifications_enabled(user_id, enabled):
+def set_notify_pairs(user_id, enabled):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE users SET notifications_enabled = ? WHERE user_id = ?",
+        "UPDATE users SET notify_pairs = ? WHERE user_id = ?",
         (1 if enabled else 0, user_id)
     )
     conn.commit()
     conn.close()
 
 
+def get_notify_attendance(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT notify_attendance FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row or row[0] is None:
+        return True
+    return bool(row[0])
+
+
+def set_notify_attendance(user_id, enabled):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET notify_attendance = ? WHERE user_id = ?",
+        (1 if enabled else 0, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_username(user_id, username):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_user_by_username(username):
+    if not username:
+        return None
+    username_clean = username.lstrip("@").lower()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM users
+        WHERE username IS NOT NULL AND LOWER(username) = ?
+    """, (username_clean,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
 # ============ РАСПИСАНИЕ ============
 
 def add_schedule_pair(university, faculty, group_name, day, pair_num, subject,
-                      teacher, room, start, end, file_id=None, week_type="числитель"):
+                      teacher, room, start, end, file_id=None, week_type="числитель",
+                      lesson_type=None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO schedule
         (university, faculty, group_name, day_of_week, week_type, pair_number,
-         subject, teacher, room, start_time, end_time, file_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         subject, teacher, room, start_time, end_time, file_id, lesson_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (university, faculty, group_name, day, week_type, pair_num,
-          subject, teacher, room, start, end, file_id))
+          subject, teacher, room, start, end, file_id, lesson_type))
     conn.commit()
     conn.close()
 
@@ -277,7 +375,7 @@ def get_schedule(university, faculty, group_name, day, week_type=None):
     cursor = conn.cursor()
     if week_type:
         cursor.execute("""
-            SELECT id, pair_number, subject, teacher, room, start_time, end_time, file_id
+            SELECT id, pair_number, subject, teacher, room, start_time, end_time, file_id, lesson_type
             FROM schedule
             WHERE university = ? AND faculty = ? AND group_name = ?
               AND day_of_week = ? AND week_type = ?
@@ -285,7 +383,7 @@ def get_schedule(university, faculty, group_name, day, week_type=None):
         """, (university, faculty, group_name, day, week_type))
     else:
         cursor.execute("""
-            SELECT id, pair_number, subject, teacher, room, start_time, end_time, file_id
+            SELECT id, pair_number, subject, teacher, room, start_time, end_time, file_id, lesson_type
             FROM schedule
             WHERE university = ? AND faculty = ? AND group_name = ? AND day_of_week = ?
             ORDER BY pair_number
@@ -332,7 +430,8 @@ def get_schedule_pair_by_key(university, faculty, group_name, day, week_type, pa
 
 
 def upsert_schedule_pair(university, faculty, group_name, day, pair_num, subject,
-                         teacher, room, start, end, file_id=None, week_type="числитель"):
+                         teacher, room, start, end, file_id=None, week_type="числитель",
+                         lesson_type=None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -344,17 +443,18 @@ def upsert_schedule_pair(university, faculty, group_name, day, pair_num, subject
     if row:
         cursor.execute("""
             UPDATE schedule
-            SET subject = ?, teacher = ?, room = ?, start_time = ?, end_time = ?, file_id = ?
+            SET subject = ?, teacher = ?, room = ?, start_time = ?, end_time = ?,
+                file_id = ?, lesson_type = ?
             WHERE id = ?
-        """, (subject, teacher, room, start, end, file_id, row[0]))
+        """, (subject, teacher, room, start, end, file_id, lesson_type, row[0]))
     else:
         cursor.execute("""
             INSERT INTO schedule
             (university, faculty, group_name, day_of_week, week_type, pair_number,
-             subject, teacher, room, start_time, end_time, file_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             subject, teacher, room, start_time, end_time, file_id, lesson_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (university, faculty, group_name, day, week_type, pair_num,
-              subject, teacher, room, start, end, file_id))
+              subject, teacher, room, start, end, file_id, lesson_type))
     conn.commit()
     conn.close()
 
@@ -431,7 +531,7 @@ def delete_homework(homework_id):
 def delete_expired_homework():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cutoff = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+    cutoff = (datetime.now(MSK) - timedelta(days=2)).strftime("%Y-%m-%d")
     cursor.execute("""
         SELECT id, subject, deadline FROM homework
         WHERE deadline IS NOT NULL AND deadline != ''
@@ -454,7 +554,7 @@ def set_homework_status(homework_id, user_id, status):
     cursor.execute("""
         INSERT OR REPLACE INTO homework_status (homework_id, user_id, status, updated_at)
         VALUES (?, ?, ?, ?)
-    """, (homework_id, user_id, status, datetime.now().isoformat()))
+    """, (homework_id, user_id, status, datetime.now(MSK).isoformat()))
     conn.commit()
     conn.close()
 
@@ -506,7 +606,7 @@ def set_attendance(user_id, schedule_id, status, date):
     cursor.execute("""
         INSERT OR REPLACE INTO attendance (user_id, schedule_id, status, date, updated_at)
         VALUES (?, ?, ?, ?, ?)
-    """, (user_id, schedule_id, status, date, datetime.now().isoformat()))
+    """, (user_id, schedule_id, status, date, datetime.now(MSK).isoformat()))
     conn.commit()
     conn.close()
 
@@ -530,7 +630,7 @@ def get_attendance_for_day_grouped(university, faculty, group_name, date):
 def get_attendance_logs_week(university, faculty, group_name, days=7):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    from_date = (datetime.now(MSK) - timedelta(days=days)).strftime("%Y-%m-%d")
     cursor.execute("""
         SELECT a.date, u.full_name, s.pair_number, s.subject, a.status
         FROM attendance a
@@ -623,21 +723,25 @@ def get_banned_users():
     return rows
 
 
-# ============ АДМИН: ВСЕ ПОЛЬЗОВАТЕЛИ ============
+# ============ АДМИН ============
 
 def get_all_users(limit=None, offset=0):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     if limit:
         cursor.execute("""
-            SELECT user_id, university, faculty, group_name, full_name, role, registered_at, notifications_enabled
+            SELECT user_id, university, faculty, group_name, full_name, role,
+                   registered_at, notifications_enabled, notify_pairs,
+                   notify_attendance, username
             FROM users
             ORDER BY registered_at DESC
             LIMIT ? OFFSET ?
         """, (limit, offset))
     else:
         cursor.execute("""
-            SELECT user_id, university, faculty, group_name, full_name, role, registered_at, notifications_enabled
+            SELECT user_id, university, faculty, group_name, full_name, role,
+                   registered_at, notifications_enabled, notify_pairs,
+                   notify_attendance, username
             FROM users
             ORDER BY registered_at DESC
         """)
@@ -681,16 +785,11 @@ def get_group_user_ids(university, faculty, group_name):
     conn.close()
     return [row[0] for row in rows]
 
+
 def get_schedule_for_tomorrow_all_groups():
-    """
-    Возвращает список: (university, faculty, group_name, day_name, pairs)
-    pairs = [(id, pair_number, subject, teacher, room, start_time, end_time, file_id), ...]
-    Используется для рассылки «Отметь явку на завтра» в 14:00.
-    """
-    from datetime import datetime as _dt, timedelta as _td
     from config import get_week_type_for_date
 
-    tomorrow = _dt.now() + _td(days=1)
+    tomorrow = datetime.now(MSK) + timedelta(days=1)
     day_name = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"][tomorrow.weekday()]
     week_type = get_week_type_for_date(tomorrow.date())
 
@@ -706,7 +805,6 @@ def get_schedule_for_tomorrow_all_groups():
 
 
 def get_user_answers_for_pairs(user_id, schedule_ids, date):
-    """Возвращает {schedule_id: status} для указанных пар и даты."""
     if not schedule_ids:
         return {}
     conn = sqlite3.connect(DB_NAME)
@@ -722,10 +820,6 @@ def get_user_answers_for_pairs(user_id, schedule_ids, date):
 
 
 def get_pairs_for_user_on_date(user_id, date_offset):
-    """
-    Возвращает пары для группы пользователя на дату (date_offset дней от сегодня).
-    Используется в обработчике callback, чтобы пересобрать клавиатуру.
-    """
     from config import get_week_type_for_date
 
     user = get_user(user_id)
@@ -733,9 +827,18 @@ def get_pairs_for_user_on_date(user_id, date_offset):
         return []
     university, faculty, group_name = user[1], user[2], user[3]
 
-    target = datetime.now() + timedelta(days=date_offset)
+    target = datetime.now(MSK) + timedelta(days=date_offset)
     day_name = ["Понедельник", "Вторник", "Среда", "Четверг",
                 "Пятница", "Суббота", "Воскресенье"][target.weekday()]
     week_type = get_week_type_for_date(target.date())
 
     return get_schedule(university, faculty, group_name, day_name, week_type)
+
+# ============ АДМИН: ПОЛНОЕ ОБНОВЛЕНИЕ РАСПИСАНИЯ ============
+
+def get_all_unique_groups():
+    """
+    Возвращает список ВСЕХ уникальных групп из таблицы users.
+    (university, faculty, group_name)
+    """
+    return get_all_groups()

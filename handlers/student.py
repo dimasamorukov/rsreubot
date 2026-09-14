@@ -6,7 +6,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from datetime import datetime, timedelta
 
-from parser import fetch_schedule_from_api, parse_schedule_for_day, format_schedule_for_message
+from parser import (
+    fetch_schedule_from_api,
+    parse_schedule_for_day,
+    format_schedule_for_message,
+    LESSON_TYPE_NAMES,
+)
 from config import get_week_type_for_date, get_current_week_type
 from database import (
     get_user, get_schedule, add_schedule_pair,
@@ -26,7 +31,13 @@ from keyboards import (
     get_homework_starosta_kb,
     get_homework_confirm_delete_kb,
     get_tomorrow_attendance_all_kb,
+    get_schedule_menu_kb,
+    get_attendance_menu_kb,
 )
+
+from zoneinfo import ZoneInfo
+
+MSK = ZoneInfo("Europe/Moscow")
 
 router = Router()
 
@@ -40,16 +51,28 @@ class DebtStates(StatesGroup):
     waiting_new_debt = State()
 
 
+# ============ МЕНЮ «РАСПИСАНИЕ» И «ПОСЕЩЕНИЕ» ============
+
+@router.message(F.text == "📅 Расписание")
+async def schedule_menu(message: types.Message):
+    await message.answer("📅 Выбери период:", reply_markup=get_schedule_menu_kb())
+
+
+@router.message(F.text == "✅ Посещение")
+async def attendance_menu(message: types.Message):
+    await message.answer("✅ Отметь посещение:", reply_markup=get_attendance_menu_kb())
+
+
 # ============ РАСПИСАНИЕ ============
 
-@router.message(F.text.contains("Сегодня") & ~F.text.contains("Явка"))
+@router.message(F.text == "📅 Сегодня")
 async def show_schedule_today(message: types.Message):
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
-    today = datetime.now()
+    today = datetime.now(MSK)
     day_name = DAYS_RU[today.weekday()]
     week_type = get_current_week_type()
     date_str = today.strftime("%d.%m.%Y")
@@ -65,7 +88,8 @@ async def show_schedule_today(message: types.Message):
                 upsert_schedule_pair(
                     user[1], user[2], user[3], day_name, p["pair_number"],
                     p["subject"], p["teacher"], p["room"],
-                    p["start_time"], p["end_time"], week_type=week_type
+                    p["start_time"], p["end_time"], week_type=week_type,
+                    lesson_type=p.get("lesson_type", "")
                 )
             pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
 
@@ -75,21 +99,22 @@ async def show_schedule_today(message: types.Message):
 
     text = format_schedule_for_message(
         [{"pair_number": p[1], "subject": p[2], "teacher": p[3],
-          "room": p[4], "start_time": p[5], "end_time": p[6], "lesson_type": ""}
+          "room": p[4], "start_time": p[5], "end_time": p[6],
+          "lesson_type": p[8] if len(p) > 8 else ""}
          for p in pairs],
         day_name, week_type, date_str
     )
     await message.answer(text, parse_mode="Markdown")
 
 
-@router.message(F.text.contains("Завтра") & ~F.text.contains("Явка"))
+@router.message(F.text == "📅 Завтра")
 async def show_schedule_tomorrow(message: types.Message):
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
-    tomorrow = datetime.now() + timedelta(days=1)
+    tomorrow = datetime.now(MSK) + timedelta(days=1)
     day_name = DAYS_RU[tomorrow.weekday()]
     week_type = get_week_type_for_date(tomorrow.date())
     date_str = tomorrow.strftime("%d.%m.%Y")
@@ -105,7 +130,8 @@ async def show_schedule_tomorrow(message: types.Message):
                 upsert_schedule_pair(
                     user[1], user[2], user[3], day_name, p["pair_number"],
                     p["subject"], p["teacher"], p["room"],
-                    p["start_time"], p["end_time"], week_type=week_type
+                    p["start_time"], p["end_time"], week_type=week_type,
+                    lesson_type=p.get("lesson_type", "")
                 )
             pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
 
@@ -115,14 +141,15 @@ async def show_schedule_tomorrow(message: types.Message):
 
     text = format_schedule_for_message(
         [{"pair_number": p[1], "subject": p[2], "teacher": p[3],
-          "room": p[4], "start_time": p[5], "end_time": p[6], "lesson_type": ""}
+          "room": p[4], "start_time": p[5], "end_time": p[6],
+          "lesson_type": p[8] if len(p) > 8 else ""}
          for p in pairs],
         day_name, week_type, date_str
     )
     await message.answer(text, parse_mode="Markdown")
 
 
-@router.message(F.text.contains("2 недели"))
+@router.message(F.text == "📅 2 недели")
 async def show_schedule_two_weeks(message: types.Message):
     user = get_user(message.from_user.id)
     if not user:
@@ -131,7 +158,7 @@ async def show_schedule_two_weeks(message: types.Message):
 
     await message.answer("📅 **Расписание на 2 недели вперёд:**")
 
-    today = datetime.now()
+    today = datetime.now(MSK)
     for offset in range(14):
         target = today + timedelta(days=offset)
         day_name = DAYS_RU[target.weekday()]
@@ -148,17 +175,24 @@ async def show_schedule_two_weeks(message: types.Message):
                     upsert_schedule_pair(
                         user[1], user[2], user[3], day_name, p["pair_number"],
                         p["subject"], p["teacher"], p["room"],
-                        p["start_time"], p["end_time"], week_type=week_type
+                        p["start_time"], p["end_time"], week_type=week_type,
+                        lesson_type=p.get("lesson_type", "")
                     )
                 pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
-
         if not pairs:
             continue
 
         week_icon = "🔵" if week_type == "числитель" else "🟢"
         text = f"📅 **{day_name}, {date_str}** {week_icon} {week_type}\n\n"
         for p in pairs:
-            text += f"**{p[1]} пара** ({p[5]})\n📖 {p[2]}\n"
+            text += f"**{p[1]} пара** ({p[5]})\n"
+
+            lesson_type = p[8] if len(p) > 8 else ""
+            if lesson_type:
+                lesson_type_full = LESSON_TYPE_NAMES.get(lesson_type, lesson_type)
+                text += f"📌 {lesson_type_full}\n"
+
+            text += f"📖 {p[2]}\n"
             if p[3]:
                 text += f"👤 {p[3]}\n"
             if p[4]:
@@ -167,11 +201,10 @@ async def show_schedule_two_weeks(message: types.Message):
         await message.answer(text, parse_mode="Markdown")
 
 
-# ============ ОБНОВЛЕНИЕ РАСПИСАНИЯ (для всех) ============
+# ============ ОБНОВЛЕНИЕ РАСПИСАНИЯ ============
 
 @router.message(F.text == "🔄 Обновить расписание")
 async def student_update_schedule(message: types.Message):
-    """Любой студент может обновить расписание своей группы (с сохранением посещаемости)"""
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала зарегистрируйтесь: /start")
@@ -179,7 +212,7 @@ async def student_update_schedule(message: types.Message):
 
     await message.answer("🔄 Обновляю расписание вашей группы...")
 
-    today = datetime.now()
+    today = datetime.now(MSK)
     date_iso = today.strftime("%Y-%m-%d")
 
     data = await fetch_schedule_from_api(user[3], date_iso)
@@ -190,8 +223,8 @@ async def student_update_schedule(message: types.Message):
         )
         return
 
-    saved = 0       # новых пар
-    updated = 0     # обновлённых
+    saved = 0
+    updated = 0
     valid_keys = set()
 
     for offset in range(14):
@@ -210,7 +243,8 @@ async def student_update_schedule(message: types.Message):
             upsert_schedule_pair(
                 user[1], user[2], user[3], day_name, p["pair_number"],
                 p["subject"], p["teacher"], p["room"],
-                p["start_time"], p["end_time"], week_type=target_week
+                p["start_time"], p["end_time"], week_type=target_week,
+                lesson_type=p.get("lesson_type", "")
             )
             valid_keys.add((day_name, target_week, p["pair_number"]))
 
@@ -234,14 +268,14 @@ async def student_update_schedule(message: types.Message):
 
 # ============ ПОСЕЩЕНИЕ ============
 
-@router.message(F.text.contains("Явка сегодня"))
+@router.message(F.text == "✅ Сегодня")
 async def show_attendance_today(message: types.Message):
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
-    today = datetime.now()
+    today = datetime.now(MSK)
     day_name = DAYS_RU[today.weekday()]
     date_str = today.strftime("%d.%m.%Y")
     week_type = get_current_week_type()
@@ -258,9 +292,19 @@ async def show_attendance_today(message: types.Message):
         parse_mode="Markdown"
     )
 
-    for pair_id, num, subject, teacher, room, start, end, file_id in pairs:
-        text = (
-            f"**{num} пара** | {subject}\n"
+    for pair in pairs:
+        pair_id = pair[0]
+        num = pair[1]
+        subject = pair[2]
+        room = pair[4]
+        start = pair[5]
+        lesson_type = pair[8] if len(pair) > 8 else ""
+        lesson_type_full = LESSON_TYPE_NAMES.get(lesson_type, lesson_type)
+
+        text = f"**{num} пара** | {subject}\n"
+        if lesson_type_full:
+            text += f"📌 {lesson_type_full}\n"
+        text += (
             f"📅 {date_str} ({day_name})\n"
             f"{week_icon} {week_type}\n"
             f"🚪 {room} | ⏰ {start}"
@@ -272,14 +316,14 @@ async def show_attendance_today(message: types.Message):
         )
 
 
-@router.message(F.text.contains("Явка завтра"))
+@router.message(F.text == "✅ Завтра")
 async def show_attendance_tomorrow(message: types.Message):
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
-    tomorrow = datetime.now() + timedelta(days=1)
+    tomorrow = datetime.now(MSK) + timedelta(days=1)
     day_name = DAYS_RU[tomorrow.weekday()]
     date_str = tomorrow.strftime("%d.%m.%Y")
     week_type = get_week_type_for_date(tomorrow.date())
@@ -296,9 +340,19 @@ async def show_attendance_tomorrow(message: types.Message):
         parse_mode="Markdown"
     )
 
-    for pair_id, num, subject, teacher, room, start, end, file_id in pairs:
-        text = (
-            f"**{num} пара** | {subject}\n"
+    for pair in pairs:
+        pair_id = pair[0]
+        num = pair[1]
+        subject = pair[2]
+        room = pair[4]
+        start = pair[5]
+        lesson_type = pair[8] if len(pair) > 8 else ""
+        lesson_type_full = LESSON_TYPE_NAMES.get(lesson_type, lesson_type)
+
+        text = f"**{num} пара** | {subject}\n"
+        if lesson_type_full:
+            text += f"📌 {lesson_type_full}\n"
+        text += (
             f"📅 {date_str} ({day_name})\n"
             f"{week_icon} {week_type}\n"
             f"🚪 {room} | ⏰ {start}"
@@ -312,15 +366,13 @@ async def show_attendance_tomorrow(message: types.Message):
 
 @router.callback_query(F.data == "att_noop")
 async def att_noop(callback: CallbackQuery):
-    """Заглушка для нажатия на заголовок пары — просто подтверждаем нажатие."""
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("att_"))
 async def process_attendance(callback: CallbackQuery):
-    # 1. Разбираем callback_data
     parts = callback.data.split("_")
-    if len(parts) < 3:
+    if len(parts) < 5:
         await callback.answer("Ошибка", show_alert=True)
         return
 
@@ -330,7 +382,8 @@ async def process_attendance(callback: CallbackQuery):
     except ValueError:
         await callback.answer("Ошибка", show_alert=True)
         return
-    date_offset = int(parts[3]) if len(parts) > 3 else 0
+    date_offset = int(parts[3])
+    is_broadcast = parts[4] == "1"
 
     status_names = {
         "will":   "✅ Буду на паре",
@@ -340,30 +393,29 @@ async def process_attendance(callback: CallbackQuery):
     }
     day_word = "сегодня" if date_offset == 0 else "завтра"
 
-    # 2. Сохраняем ответ в БД
-    target_date = (datetime.now() + timedelta(days=date_offset)).strftime("%Y-%m-%d")
+    target_date = (datetime.now(MSK) + timedelta(days=date_offset)).strftime("%Y-%m-%d")
     set_attendance(callback.from_user.id, schedule_id, status, target_date)
 
-    # 3. Подтверждаем нажатие (всплывающее уведомление сверху)
     await callback.answer(f"{status_names.get(status, status)} ({day_word})")
 
-    # 4. Пересобираем клавиатуру с подсветкой выбранного
-    pairs = get_pairs_for_user_on_date(callback.from_user.id, date_offset)
-    if not pairs:
-        return
-
-    schedule_ids = [p[0] for p in pairs]
-    user_answers = get_user_answers_for_pairs(
-        callback.from_user.id, schedule_ids, target_date
-    )
-    new_kb = get_tomorrow_attendance_all_kb(pairs, user_answers)
-
-    # 5. Обновляем ТОЛЬКО клавиатуру — сообщение и текст остаются
-    try:
-        await callback.message.edit_reply_markup(reply_markup=new_kb)
-    except TelegramBadRequest:
-        # Если разметка не изменилась — Telegram вернёт ошибку, игнорируем
-        pass
+    if is_broadcast:
+        pairs = get_pairs_for_user_on_date(callback.from_user.id, date_offset)
+        if not pairs:
+            return
+        schedule_ids = [p[0] for p in pairs]
+        user_answers = get_user_answers_for_pairs(
+            callback.from_user.id, schedule_ids, target_date
+        )
+        new_kb = get_tomorrow_attendance_all_kb(pairs, user_answers)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=new_kb)
+        except TelegramBadRequest:
+            pass
+    else:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
 
 
 # ============ ДОМАШКА ============
@@ -383,6 +435,8 @@ async def show_homework(message: types.Message):
 
     await message.answer("📚 **Последние домашние задания:**")
 
+    is_starosta = user[5] == 'starosta'
+
     for hw_id, subject, task, deadline, file_id in homework:
         status = get_homework_status(hw_id, message.from_user.id)
         status_text = ""
@@ -395,10 +449,12 @@ async def show_homework(message: types.Message):
         if deadline:
             text += f"⏰ Срок: {deadline}\n"
 
+        kb = get_homework_starosta_kb(hw_id) if is_starosta else get_homework_actions_kb(hw_id)
+
         await message.answer(
             text,
             parse_mode="Markdown",
-            reply_markup=get_homework_actions_kb(hw_id)
+            reply_markup=kb
         )
 
 
@@ -543,7 +599,7 @@ async def show_help(message: types.Message):
         "📅 Расписание — пары на сегодня/завтра\n"
         "📚 ДЗ — домашние задания\n"
         "📝 Задолженности — твои долги\n"
-        "✅ Явка — отметить пары\n"
+        "✅ Посещение — отметить пары\n"
         "🔄 Обновить расписание — подтянуть свежие данные\n\n"
         "Если что-то не работает — @hiloetc"
     )
@@ -607,7 +663,6 @@ async def hw_delete_no(callback):
 
 @router.callback_query(F.data.startswith("hw_delete_"))
 async def hw_delete_start(callback):
-    """Староста нажимает «🗑 Удалить ДЗ»"""
     user = get_user(callback.from_user.id)
     if not user or user[5] != 'starosta':
         await callback.answer("⛔ Только староста может удалять ДЗ.", show_alert=True)

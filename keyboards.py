@@ -24,11 +24,30 @@ def get_faculties_kb():
     )
 
 
+def get_schedule_menu_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра")],
+            [KeyboardButton(text="📅 2 недели")],
+            [KeyboardButton(text="🔙 Назад")],
+        ],
+        resize_keyboard=True
+    )
+
+
+def get_attendance_menu_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="✅ Сегодня"), KeyboardButton(text="✅ Завтра")],
+            [KeyboardButton(text="🔙 Назад")],
+        ],
+        resize_keyboard=True
+    )
+
 def get_main_menu(is_admin=False):
     buttons = [
         [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="📚 ДЗ")],
-        [KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра"), KeyboardButton(text="📅 2 недели")],
-        [KeyboardButton(text="✅ Явка сегодня"), KeyboardButton(text="✅ Явка завтра")],
+        [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="✅ Посещение")],
         [KeyboardButton(text="🔄 Обновить расписание")],
         [KeyboardButton(text="📝 Задолженности"), KeyboardButton(text="ℹ️ Помощь")],
     ]
@@ -85,8 +104,15 @@ def get_attendance_kb(schedule_id, date_offset=0):
     )
 
 
-def get_profile_edit_kb(notifications_enabled=True):
-    notif_text = "🔔 ВКЛ" if notifications_enabled else "🔕 ВЫКЛ"
+def get_profile_edit_kb(notify_pairs: bool = True, notify_attendance: bool = True):
+    """
+    Клавиатура профиля.
+    notify_pairs — напоминания о парах за 30 минут
+    notify_attendance — рассылка «Отметь явку на завтра»
+    """
+    pairs_text = "🔔 Пары: ВКЛ" if notify_pairs else "🔕 Пары: ВЫКЛ"
+    attendance_text = "📋 Явка: ВКЛ" if notify_attendance else "📋 Явка: ВЫКЛ"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -97,24 +123,24 @@ def get_profile_edit_kb(notifications_enabled=True):
                 InlineKeyboardButton(text="✏️ Группа", callback_data="edit_group_name"),
                 InlineKeyboardButton(text="✏️ ФИО", callback_data="edit_full_name"),
             ],
-            [InlineKeyboardButton(text=f"🔔 Уведомления: {notif_text}", callback_data="toggle_notifications")],
+            [InlineKeyboardButton(text=pairs_text, callback_data="toggle_notify_pairs")],
+            [InlineKeyboardButton(text=attendance_text, callback_data="toggle_notify_attendance")],
             [InlineKeyboardButton(text="🔙 Закрыть", callback_data="edit_close")],
         ]
     )
 
 
 def get_admin_panel_kb():
-    """Панель старосты (без кнопок файлов)"""
-    kb = ReplyKeyboardMarkup(
+    return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ ДЗ"), KeyboardButton(text="➕ Пара")],
             [KeyboardButton(text="👥 Список группы"), KeyboardButton(text="📊 Посещаемость")],
             [KeyboardButton(text="📜 Логи посещаемости")],
+            [KeyboardButton(text="🔄 Обновить")],
             [KeyboardButton(text="🔙 Назад")],
         ],
         resize_keyboard=True
     )
-    return kb
 
 
 def get_days_kb(prefix="day"):
@@ -276,34 +302,17 @@ def get_remove_starosta_confirm_kb(user_id: int):
         ]
     )
 
-def get_tomorrow_attendance_kb(schedule_id: int, date_offset: int = 1):
-    """
-    Inline-клавиатура для отметки на завтра.
-    date_offset = 1 (завтра) — для рассылки в 14:00.
-    callback_data совпадает с уже существующим форматом att_*, поэтому
-    student.py::process_attendance уже умеет это обрабатывать.
-    """
+def get_attendance_kb(schedule_id, date_offset=0):
+    """Маленькая клавиатура для РУЧНОЙ явки. broadcast=0."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="✅ Буду",
-                    callback_data=f"att_will_{schedule_id}_{date_offset}"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Не приду",
-                    callback_data=f"att_absent_{schedule_id}_{date_offset}"
-                ),
+                InlineKeyboardButton(text="✅ Буду", callback_data=f"att_will_{schedule_id}_{date_offset}_0"),
+                InlineKeyboardButton(text="❌ Не приду", callback_data=f"att_absent_{schedule_id}_{date_offset}_0"),
             ],
             [
-                InlineKeyboardButton(
-                    text="🤒 Заболел",
-                    callback_data=f"att_sick_{schedule_id}_{date_offset}"
-                ),
-                InlineKeyboardButton(
-                    text="⏰ Задержусь",
-                    callback_data=f"att_late_{schedule_id}_{date_offset}"
-                ),
+                InlineKeyboardButton(text="🤒 Заболел", callback_data=f"att_sick_{schedule_id}_{date_offset}_0"),
+                InlineKeyboardButton(text="⏰ Задержусь", callback_data=f"att_late_{schedule_id}_{date_offset}_0"),
             ]
         ]
     )
@@ -311,9 +320,7 @@ def get_tomorrow_attendance_kb(schedule_id: int, date_offset: int = 1):
 
 def get_tomorrow_attendance_all_kb(pairs: list, user_answers: dict = None):
     """
-    Inline-клавиатура для ВСЕХ пар на завтра — одним блоком.
-    pairs — список кортежей (id, pair_number, subject, teacher, room, start_time, end_time, file_id)
-    user_answers — {schedule_id: "will"/"absent"/"sick"/"late"} для подсветки уже выбранного.
+    Большая клавиатура для РАССЫЛКИ. broadcast=1.
     """
     user_answers = user_answers or {}
     rows = []
@@ -323,7 +330,6 @@ def get_tomorrow_attendance_all_kb(pairs: list, user_answers: dict = None):
         subject = pair[2]
         current = user_answers.get(schedule_id)
 
-        # короткая подпись предмета
         short_subj = subject if len(subject) <= 20 else subject[:17] + "..."
 
         will_text   = "✅ Буду"      if current == "will"   else "Буду"
@@ -338,14 +344,38 @@ def get_tomorrow_attendance_all_kb(pairs: list, user_answers: dict = None):
             ),
         ])
         rows.append([
-            InlineKeyboardButton(text=will_text,   callback_data=f"att_will_{schedule_id}_1"),
-            InlineKeyboardButton(text=absent_text, callback_data=f"att_absent_{schedule_id}_1"),
+            InlineKeyboardButton(text=will_text,   callback_data=f"att_will_{schedule_id}_1_1"),
+            InlineKeyboardButton(text=absent_text, callback_data=f"att_absent_{schedule_id}_1_1"),
         ])
         rows.append([
-            InlineKeyboardButton(text=sick_text,   callback_data=f"att_sick_{schedule_id}_1"),
-            InlineKeyboardButton(text=late_text,   callback_data=f"att_late_{schedule_id}_1"),
+            InlineKeyboardButton(text=sick_text,   callback_data=f"att_sick_{schedule_id}_1_1"),
+            InlineKeyboardButton(text=late_text,   callback_data=f"att_late_{schedule_id}_1_1"),
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def get_noop_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[])
+def get_tomorrow_attendance_kb(schedule_id, date_offset=1):
+    """Inline-клавиатура для отметки на завтра (устаревшая, используется редко)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Буду",
+                    callback_data=f"att_will_{schedule_id}_{date_offset}_0"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Не приду",
+                    callback_data=f"att_absent_{schedule_id}_{date_offset}_0"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤒 Заболел",
+                    callback_data=f"att_sick_{schedule_id}_{date_offset}_0"
+                ),
+                InlineKeyboardButton(
+                    text="⏰ Задержусь",
+                    callback_data=f"att_late_{schedule_id}_{date_offset}_0"
+                ),
+            ]
+        ]
+    )

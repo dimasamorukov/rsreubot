@@ -7,7 +7,9 @@ import asyncio
 from aiogram import Bot
 from config import get_current_week_type, get_week_type_for_date
 from database import (
-    get_all_groups, get_schedule, get_users_with_notifications,
+    get_all_groups, get_schedule,
+    get_users_for_pair_notifications,
+    get_users_for_attendance_broadcast,
     get_homework, get_homework_status,
     get_schedule_pair_by_key, upsert_schedule_pair, delete_orphan_schedule_pairs,
     delete_expired_homework,
@@ -16,7 +18,6 @@ from database import (
 )
 
 from keyboards import (
-    get_tomorrow_attendance_kb,
     get_tomorrow_attendance_all_kb,
 )
 
@@ -40,7 +41,6 @@ MSK = ZoneInfo("Europe/Moscow")
 
 
 def extract_start_time(raw: str) -> str:
-    """Извлекает время начала из строки любого формата"""
     if not raw:
         return ""
     match = re.search(r"(\d{1,2}):(\d{2})", raw)
@@ -53,7 +53,6 @@ def extract_start_time(raw: str) -> str:
 # ============ НАПОМИНАНИЯ О ПАРАХ ============
 
 async def check_upcoming_pairs(bot: Bot):
-    """Каждую минуту проверяет: нет ли пары, которая начнётся через 30 минут"""
     now = datetime.now(MSK)
     target_time = (now + timedelta(minutes=30)).strftime("%H:%M")
     today = DAYS_RU[now.weekday()]
@@ -67,12 +66,12 @@ async def check_upcoming_pairs(bot: Bot):
     for university, faculty, group_name in groups:
         pairs = get_schedule(university, faculty, group_name, today, week_type)
 
-        for pair_id, num, subject, teacher, room, start, end, file_id in pairs:
+        for pair_id, num, subject, teacher, room, start, end, file_id, lesson_type in pairs:
             start_short = extract_start_time(start)
             if start_short != target_time:
                 continue
 
-            users = get_users_with_notifications(university, faculty, group_name)
+            users = get_users_for_pair_notifications(university, faculty, group_name)
 
             for user_id, full_name in users:
                 try:
@@ -88,7 +87,6 @@ async def check_upcoming_pairs(bot: Bot):
                 except Exception as e:
                     print(f"[scheduler] Не удалось отправить {user_id}: {e}")
 
-            # Напоминание о ДЗ
             homework_list = get_homework(university, faculty, group_name)
             for hw_id, hw_subject, task, deadline, hw_file in homework_list:
                 if hw_subject != subject:
@@ -107,14 +105,9 @@ async def check_upcoming_pairs(bot: Bot):
                         print(f"[scheduler] Ошибка ДЗ для {user_id}: {e}")
 
 
-# ============ АВТООБНОВЛЕНИЕ РАСПИСАНИЯ (с сохранением посещаемости) ============
+# ============ АВТООБНОВЛЕНИЕ РАСПИСАНИЯ ============
 
 async def auto_update_all_schedules(bot: Bot):
-    """
-    Раз в час обновляет расписание ВСЕХ групп из базы.
-    Использует upsert_schedule_pair — сохраняет schedule_id для неизменившихся пар,
-    поэтому посещаемость НЕ СБРАСЫВАЕТСЯ.
-    """
     print(f"[scheduler] 🔄 Автообновление расписания: {datetime.now(MSK).strftime('%d.%m.%Y %H:%M')} МСК")
 
     groups = get_all_groups()
@@ -133,8 +126,8 @@ async def auto_update_all_schedules(bot: Bot):
                 print(f"[scheduler]   ❌ Не удалось получить расписание для {group_name}")
                 continue
 
-            saved = 0      # новых пар
-            updated = 0    # обновлённых
+            saved = 0
+            updated = 0
             valid_keys = set()
 
             for offset in range(14):
@@ -150,12 +143,12 @@ async def auto_update_all_schedules(bot: Bot):
                         day_name, target_week, p["pair_number"]
                     )
 
-                    # Умное обновление — сохраняет id и посещаемость
                     upsert_schedule_pair(
                         university, faculty, group_name,
                         day_name, p["pair_number"], p["subject"],
                         p["teacher"], p["room"], p["start_time"], p["end_time"],
-                        week_type=target_week
+                        week_type=target_week,
+                        lesson_type=p.get("lesson_type", "")
                     )
                     valid_keys.add((day_name, target_week, p["pair_number"]))
 
@@ -164,7 +157,6 @@ async def auto_update_all_schedules(bot: Bot):
                     else:
                         saved += 1
 
-            # Удаляем только те пары, которых больше нет в расписании
             deleted = delete_orphan_schedule_pairs(
                 university, faculty, group_name, valid_keys
             )
@@ -177,10 +169,9 @@ async def auto_update_all_schedules(bot: Bot):
     print("[scheduler] 🔄 Автообновление завершено")
 
 
-# ============ АВТОУДАЛЕНИЕ ПРОСРОЧЕННЫХ ДЗ ============
+# ============ АВТОУДАЛЕНИЕ ДЗ ============
 
 async def cleanup_expired_homework(bot: Bot):
-    """Раз в сутки удаляет ДЗ, у которых срок истёк более 2 дней назад"""
     print(f"[scheduler] 🧹 Очистка просроченных ДЗ: {datetime.now(MSK).strftime('%d.%m.%Y %H:%M')} МСК")
     expired = delete_expired_homework()
     if not expired:
@@ -191,15 +182,9 @@ async def cleanup_expired_homework(bot: Bot):
     print(f"[scheduler] 🧹 Удалено ДЗ: {len(expired)}")
 
 
-# ============ РАССЫЛКА «ОТМЕТЬ ЯВКУ НА ЗАВТРА» (14:00 МСК) ============
+# ============ РАССЫЛКА ЯВКИ ============
 
 async def send_tomorrow_attendance_requests(bot: Bot):
-    """
-    Каждый день в 14:00 МСК рассылает всем студентам ОДНО сообщение
-    с парами на завтра и inline-кнопками для отметки.
-
-    Рассылка идёт ТОЛЬКО для групп, в которых есть староста.
-    """
     now = datetime.now(MSK)
     print(f"[scheduler] 📋 Рассылка 'Отметь явку на завтра': {now.strftime('%d.%m.%Y %H:%M')} МСК")
 
@@ -214,16 +199,14 @@ async def send_tomorrow_attendance_requests(bot: Bot):
     groups_skipped = 0
 
     for university, faculty, group_name, day_name, pairs in data:
-        # Проверка: есть ли староста в группе
         starosta = get_starosta(university, faculty, group_name)
         if not starosta:
             print(f"[scheduler] 📋 Группа {group_name}: нет старосты → пропускаю")
             groups_skipped += 1
             continue
 
-        users = get_users_with_notifications(university, faculty, group_name)
+        users = get_users_for_attendance_broadcast(university, faculty, group_name)
 
-        # Формируем текст сообщения
         date_str = (datetime.now(MSK) + timedelta(days=1)).strftime("%d.%m.%Y")
 
         text = (
@@ -233,7 +216,7 @@ async def send_tomorrow_attendance_requests(bot: Bot):
         )
 
         for pair in pairs:
-            pair_id, pair_num, subject, teacher, room, start, end, file_id = pair
+            pair_id, pair_num, subject, teacher, room, start, end, file_id, lesson_type = pair
             text += f"<b>{pair_num} пара</b> | {subject}\n"
             text += f"🚪 {room or '—'} | ⏰ {start or '—'}\n"
             if teacher:
@@ -242,10 +225,8 @@ async def send_tomorrow_attendance_requests(bot: Bot):
 
         text += "<i>Нажми кнопку под сообщением, чтобы отметить каждую пару.</i>"
 
-        # Формируем клавиатуру со всеми парами
         kb = get_tomorrow_attendance_all_kb(pairs)
 
-        # Отправляем ОДНО сообщение каждому студенту
         for user_id, full_name in users:
             try:
                 await bot.send_message(
@@ -255,7 +236,7 @@ async def send_tomorrow_attendance_requests(bot: Bot):
                     reply_markup=kb
                 )
                 total_sent += 1
-                await asyncio.sleep(0.05)  # задержка между пользователями
+                await asyncio.sleep(0.05)
             except Exception as e:
                 total_failed += 1
                 print(f"[scheduler] Не удалось отправить {user_id}: {e}")
@@ -263,80 +244,25 @@ async def send_tomorrow_attendance_requests(bot: Bot):
     print(f"[scheduler] 📋 Отправлено: {total_sent}, ошибок: {total_failed}, групп пропущено (нет старосты): {groups_skipped}")
 
 
-# ============ ЗАПУСК ПЛАНИРОВЩИКА ============
+# ============ ЗАПУСК ============
 
 def start_scheduler(bot: Bot):
-    # 1. Напоминания о парах — каждую минуту
-    scheduler.add_job(
-        check_upcoming_pairs,
-        "interval",
-        minutes=1,
-        args=[bot],
-        id="check_pairs",
-        replace_existing=True
-    )
+    scheduler.add_job(check_upcoming_pairs, "interval", minutes=1, args=[bot], id="check_pairs", replace_existing=True)
 
-    # 2. Автообновление расписания — каждый час
-    scheduler.add_job(
-        auto_update_all_schedules,
-        "interval",
-        hours=1,
-        args=[bot],
-        id="auto_update_schedules",
-        replace_existing=True
-    )
+    scheduler.add_job(auto_update_all_schedules, "interval", hours=1, args=[bot], id="auto_update_schedules", replace_existing=True)
 
-    # 3. Первое автообновление — через 10 секунд после старта
-    scheduler.add_job(
-        auto_update_all_schedules,
-        "date",
-        run_date=datetime.now(MSK) + timedelta(seconds=10),
-        args=[bot],
-        id="auto_update_initial",
-        replace_existing=True
-    )
+    scheduler.add_job(auto_update_all_schedules, "date", run_date=datetime.now(MSK) + timedelta(seconds=10), args=[bot], id="auto_update_initial", replace_existing=True)
 
-    # 4. Автоудаление просроченных ДЗ — раз в сутки
-    scheduler.add_job(
-        cleanup_expired_homework,
-        "interval",
-        hours=24,
-        args=[bot],
-        id="cleanup_homework",
-        replace_existing=True
-    )
+    scheduler.add_job(cleanup_expired_homework, "interval", hours=24, args=[bot], id="cleanup_homework", replace_existing=True)
 
-    # 5. Первый запуск очистки — через 30 секунд после старта
-    scheduler.add_job(
-        cleanup_expired_homework,
-        "date",
-        run_date=datetime.now(MSK) + timedelta(seconds=30),
-        args=[bot],
-        id="cleanup_homework_initial",
-        replace_existing=True
-    )
+    scheduler.add_job(cleanup_expired_homework, "date", run_date=datetime.now(MSK) + timedelta(seconds=30), args=[bot], id="cleanup_homework_initial", replace_existing=True)
 
-    # 6. Рассылка «Отметь явку на завтра» — каждый день в 14:00 МСК
-    scheduler.add_job(
-        send_tomorrow_attendance_requests,
-        "cron",
-        hour=14,
-        minute=0,
-        timezone=MSK,
-        args=[bot],
-        id="tomorrow_attendance",
-        replace_existing=True
-    )
+    scheduler.add_job(send_tomorrow_attendance_requests, "cron", hour=14, minute=0, timezone=MSK, args=[bot], id="tomorrow_attendance", replace_existing=True)
 
-    # 7. Синхронизация с PostgreSQL — каждый час (если sync.py есть)
+    scheduler.add_job(auto_update_all_schedules, "cron", hour=0, minute=0, timezone=MSK, args=[bot], id="auto_update_midnight", replace_existing=True)
+
     if SYNC_AVAILABLE:
-        scheduler.add_job(
-            sync_tables,
-            "interval",
-            hours=1,
-            id="sync_db",
-            replace_existing=True
-        )
+        scheduler.add_job(sync_tables, "interval", hours=1, id="sync_db", replace_existing=True)
         print("⏰ Планировщик: напоминания + автообновление + очистка ДЗ + рассылка на завтра + синхронизация")
     else:
         print("⏰ Планировщик: напоминания + автообновление + очистка ДЗ + рассылка на завтра")
