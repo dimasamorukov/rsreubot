@@ -14,7 +14,6 @@ FACULTY_IDS = {
 }
 
 def get_faculty_id(faculty_name: str) -> str:
-    """Возвращает ID факультета для парсера или None, если не найден"""
     return FACULTY_IDS.get(faculty_name)
 
 
@@ -34,11 +33,9 @@ GROUP_IDS = {
 }
 
 def get_group_id(group_name: str) -> str:
-    """Возвращает ID группы для парсера или None, если не найден"""
     return GROUP_IDS.get(group_name)
 
 
-# Список ID админов из .env (через запятую)
 ADMIN_IDS = [
     int(x.strip())
     for x in os.getenv("ADMIN_IDS", "").split(",")
@@ -49,32 +46,35 @@ if not BOT_TOKEN:
     raise ValueError("Токен не найден! Проверь файл .env")
 
 
-# ============ НАСТРОЙКИ УЧЕБНОГО СЕМЕСТРА ============
+# ============ ВУЗЫ И ФАКУЛЬТЕТЫ ============
 
-# Дата начала семестра. В этот день — ПЕРВАЯ неделя.
-# Формат: "YYYY-MM-DD"
-# По данным API: 14.09.2026 — числитель, 07.09.2026 — знаменатель
+UNIVERSITIES = ["РГРТУ", "РГУ"]
+
+# Факультеты РГРТУ
+FACULTIES_RGRTU = ["ФРТ", "ФВТ", "ФАИТУ", "ИЭФ", "ФЭ"]
+
+# Факультеты РГУ
+FACULTIES_RGU = [
+    "ФЭСУ", "ИФМиКН", "ИЕН", "ИИЯ",
+    "ФФКС", "ИИФПН", "ФРФНК", "ИППСР", "ЮИ",
+]
+
+# ============ СЕМЕСТР (для обоих вузов одинаковые) ============
+
 SEMESTER_START = "2026-09-07"
-
-# Какая неделя идёт первой — "числитель" или "знаменатель"
 FIRST_WEEK_TYPE = "знаменатель"
 
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-# Московский часовой пояс — чтобы все даты/время считались по МСК,
-# а не по UTC сервера (Bothost работает в UTC)
 MSK = ZoneInfo("Europe/Moscow")
 
 
-def get_current_week_type() -> str:
-    """
-    Возвращает 'числитель' или 'знаменатель' для текущей недели (по МСК).
-    Считает от SEMESTER_START.
-    """
+def get_current_week_type(university: str = "РГРТУ") -> str:
+    """Возвращает 'числитель' или 'знаменатель' для вуза (МСК)"""
     start = datetime.strptime(SEMESTER_START, "%Y-%m-%d").date()
-    today = datetime.now(MSK).date()   # ← МСК, а не UTC
+    today = datetime.now(MSK).date()
 
     days_diff = (today - start).days
     weeks_diff = days_diff // 7
@@ -85,11 +85,8 @@ def get_current_week_type() -> str:
         return "знаменатель" if FIRST_WEEK_TYPE == "числитель" else "числитель"
 
 
-def get_week_type_for_date(target_date) -> str:
-    """
-    Возвращает 'числитель' или 'знаменатель' для конкретной даты.
-    target_date — объект datetime.date
-    """
+def get_week_type_for_date(target_date, university: str = "РГРТУ") -> str:
+    """Возвращает 'числитель' или 'знаменатель' для конкретной даты (МСК)"""
     start = datetime.strptime(SEMESTER_START, "%Y-%m-%d").date()
 
     days_diff = (target_date - start).days

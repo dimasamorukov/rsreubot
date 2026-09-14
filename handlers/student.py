@@ -10,6 +10,7 @@ from parser import (
     fetch_schedule_from_api,
     parse_schedule_for_day,
     format_schedule_for_message,
+    format_schedule_grouped,
     LESSON_TYPE_NAMES,
 )
 from config import get_week_type_for_date, get_current_week_type
@@ -24,15 +25,17 @@ from database import (
     get_homework_by_id,
     get_user_answers_for_pairs,
     get_pairs_for_user_on_date,
+    get_user_subgroup,
 )
 from keyboards import (
-    get_homework_actions_kb, get_attendance_kb,
+    get_homework_actions_kb,
     get_debts_menu_kb, get_debts_delete_kb,
     get_homework_starosta_kb,
     get_homework_confirm_delete_kb,
     get_tomorrow_attendance_all_kb,
     get_schedule_menu_kb,
     get_attendance_menu_kb,
+    get_attendance_kb,
 )
 
 from zoneinfo import ZoneInfo
@@ -51,7 +54,7 @@ class DebtStates(StatesGroup):
     waiting_new_debt = State()
 
 
-# ============ МЕНЮ «РАСПИСАНИЕ» И «ПОСЕЩЕНИЕ» ============
+# ============ МЕНЮ ============
 
 @router.message(F.text == "📅 Расписание")
 async def schedule_menu(message: types.Message):
@@ -65,6 +68,24 @@ async def attendance_menu(message: types.Message):
 
 # ============ РАСПИСАНИЕ ============
 
+def _pairs_to_dicts(pairs):
+    result = []
+    for p in pairs:
+        result.append({
+            "pair_number": p[1],
+            "subject": p[2],
+            "teacher": p[3],
+            "room": p[4],
+            "start_time": p[5],
+            "end_time": p[6],
+            "lesson_type": p[8] if len(p) > 8 else "",
+            "subgroup": p[9] if len(p) > 9 else 0,
+            "valid_until": p[10] if len(p) > 10 else None,
+            "lesson_type_full": p[11] if len(p) > 11 else "",
+        })
+    return result
+
+
 @router.message(F.text == "📅 Сегодня")
 async def show_schedule_today(message: types.Message):
     user = get_user(message.from_user.id)
@@ -72,37 +93,49 @@ async def show_schedule_today(message: types.Message):
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
+    university = user[1]
+    subgroup = user[11] if len(user) > 11 else 0
+
     today = datetime.now(MSK)
     day_name = DAYS_RU[today.weekday()]
-    week_type = get_current_week_type()
+    week_type = get_current_week_type(university)
     date_str = today.strftime("%d.%m.%Y")
     date_iso = today.strftime("%Y-%m-%d")
 
-    pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
+    pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                         check_date=date_iso)
 
-    if not pairs:
+    if not pairs and university == "РГРТУ":
         data = await fetch_schedule_from_api(user[3], date_iso)
         if data:
             api_pairs = parse_schedule_for_day(data, date_iso, week_type)
             for p in api_pairs:
                 upsert_schedule_pair(
-                    user[1], user[2], user[3], day_name, p["pair_number"],
+                    university, user[2], user[3], day_name, p["pair_number"],
                     p["subject"], p["teacher"], p["room"],
                     p["start_time"], p["end_time"], week_type=week_type,
-                    lesson_type=p.get("lesson_type", "")
+                    lesson_type=p.get("lesson_type", ""),
+                    subgroup=0,
+                    lesson_type_full=LESSON_TYPE_NAMES.get(p.get("lesson_type", ""), ""),
                 )
-            pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
+            pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                                 check_date=date_iso)
 
     if not pairs:
-        await message.answer(f"📅 На {day_name} ({week_type}) пар нет 🎉")
+        if university == "РГУ":
+            await message.answer(
+                f"📅 На {day_name} ({week_type}) пар нет.\n"
+                f"<i>Расписание РГУ заполняет староста.</i>",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(f"📅 На {day_name} ({week_type}) пар нет 🎉")
         return
 
-    text = format_schedule_for_message(
-        [{"pair_number": p[1], "subject": p[2], "teacher": p[3],
-          "room": p[4], "start_time": p[5], "end_time": p[6],
-          "lesson_type": p[8] if len(p) > 8 else ""}
-         for p in pairs],
-        day_name, week_type, date_str
+    text = format_schedule_grouped(
+        _pairs_to_dicts(pairs),
+        day_name, week_type, date_str,
+        user_subgroup=subgroup
     )
     await message.answer(text, parse_mode="Markdown")
 
@@ -114,37 +147,49 @@ async def show_schedule_tomorrow(message: types.Message):
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
+    university = user[1]
+    subgroup = user[11] if len(user) > 11 else 0
+
     tomorrow = datetime.now(MSK) + timedelta(days=1)
     day_name = DAYS_RU[tomorrow.weekday()]
-    week_type = get_week_type_for_date(tomorrow.date())
+    week_type = get_week_type_for_date(tomorrow.date(), university)
     date_str = tomorrow.strftime("%d.%m.%Y")
     date_iso = tomorrow.strftime("%Y-%m-%d")
 
-    pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
+    pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                         check_date=date_iso)
 
-    if not pairs:
+    if not pairs and university == "РГРТУ":
         data = await fetch_schedule_from_api(user[3], date_iso)
         if data:
             api_pairs = parse_schedule_for_day(data, date_iso, week_type)
             for p in api_pairs:
                 upsert_schedule_pair(
-                    user[1], user[2], user[3], day_name, p["pair_number"],
+                    university, user[2], user[3], day_name, p["pair_number"],
                     p["subject"], p["teacher"], p["room"],
                     p["start_time"], p["end_time"], week_type=week_type,
-                    lesson_type=p.get("lesson_type", "")
+                    lesson_type=p.get("lesson_type", ""),
+                    subgroup=0,
+                    lesson_type_full=LESSON_TYPE_NAMES.get(p.get("lesson_type", ""), ""),
                 )
-            pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
+            pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                                 check_date=date_iso)
 
     if not pairs:
-        await message.answer(f"📅 На {day_name} ({week_type}) пар нет 🎉")
+        if university == "РГУ":
+            await message.answer(
+                f"📅 На {day_name} ({week_type}) пар нет.\n"
+                f"<i>Расписание РГУ заполняет староста.</i>",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(f"📅 На {day_name} ({week_type}) пар нет 🎉")
         return
 
-    text = format_schedule_for_message(
-        [{"pair_number": p[1], "subject": p[2], "teacher": p[3],
-          "room": p[4], "start_time": p[5], "end_time": p[6],
-          "lesson_type": p[8] if len(p) > 8 else ""}
-         for p in pairs],
-        day_name, week_type, date_str
+    text = format_schedule_grouped(
+        _pairs_to_dicts(pairs),
+        day_name, week_type, date_str,
+        user_subgroup=subgroup
     )
     await message.answer(text, parse_mode="Markdown")
 
@@ -156,58 +201,61 @@ async def show_schedule_two_weeks(message: types.Message):
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
+    university = user[1]
+    subgroup = user[11] if len(user) > 11 else 0
     await message.answer("📅 **Расписание на 2 недели вперёд:**")
 
     today = datetime.now(MSK)
     for offset in range(14):
         target = today + timedelta(days=offset)
         day_name = DAYS_RU[target.weekday()]
-        week_type = get_week_type_for_date(target.date())
+        week_type = get_week_type_for_date(target.date(), university)
         date_str = target.strftime("%d.%m.%Y")
         date_iso = target.strftime("%Y-%m-%d")
 
-        pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
-        if not pairs:
+        pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                             check_date=date_iso)
+        if not pairs and university == "РГРТУ":
             data = await fetch_schedule_from_api(user[3], date_iso)
             if data:
                 api_pairs = parse_schedule_for_day(data, date_iso, week_type)
                 for p in api_pairs:
                     upsert_schedule_pair(
-                        user[1], user[2], user[3], day_name, p["pair_number"],
+                        university, user[2], user[3], day_name, p["pair_number"],
                         p["subject"], p["teacher"], p["room"],
                         p["start_time"], p["end_time"], week_type=week_type,
-                        lesson_type=p.get("lesson_type", "")
+                        lesson_type=p.get("lesson_type", ""),
+                        subgroup=0,
+                        lesson_type_full=LESSON_TYPE_NAMES.get(p.get("lesson_type", ""), ""),
                     )
-                pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
+                pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                                     check_date=date_iso)
         if not pairs:
             continue
 
-        week_icon = "🔵" if week_type == "числитель" else "🟢"
-        text = f"📅 **{day_name}, {date_str}** {week_icon} {week_type}\n\n"
-        for p in pairs:
-            text += f"**{p[1]} пара** ({p[5]})\n"
-
-            lesson_type = p[8] if len(p) > 8 else ""
-            if lesson_type:
-                lesson_type_full = LESSON_TYPE_NAMES.get(lesson_type, lesson_type)
-                text += f"📌 {lesson_type_full}\n"
-
-            text += f"📖 {p[2]}\n"
-            if p[3]:
-                text += f"👤 {p[3]}\n"
-            if p[4]:
-                text += f"🚪 {p[4]}\n"
-            text += "\n"
+        text = format_schedule_grouped(
+            _pairs_to_dicts(pairs),
+            day_name, week_type, date_str,
+            user_subgroup=subgroup
+        )
         await message.answer(text, parse_mode="Markdown")
 
 
-# ============ ОБНОВЛЕНИЕ РАСПИСАНИЯ ============
+# ============ ОБНОВЛЕНИЕ РАСПИСАНИЯ (ТОЛЬКО РГРТУ) ============
 
 @router.message(F.text == "🔄 Обновить расписание")
 async def student_update_schedule(message: types.Message):
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала зарегистрируйтесь: /start")
+        return
+
+    if user[1] != "РГРТУ":
+        await message.answer(
+            "ℹ️ Автообновление доступно только для <b>РГРТУ</b>.\n"
+            "Расписание РГУ заполняет староста вручную.",
+            parse_mode="HTML"
+        )
         return
 
     await message.answer("🔄 Обновляю расписание вашей группы...")
@@ -231,22 +279,25 @@ async def student_update_schedule(message: types.Message):
         target = today + timedelta(days=offset)
         day_name = DAYS_RU[target.weekday()]
         target_iso = target.strftime("%Y-%m-%d")
-        target_week = get_week_type_for_date(target.date())
+        target_week = get_week_type_for_date(target.date(), user[1])
 
         pairs = parse_schedule_for_day(data, target_iso, target_week)
         for p in pairs:
             existing = get_schedule_pair_by_key(
                 user[1], user[2], user[3],
-                day_name, target_week, p["pair_number"]
+                day_name, target_week, p["pair_number"], subgroup=0
             )
 
             upsert_schedule_pair(
                 user[1], user[2], user[3], day_name, p["pair_number"],
                 p["subject"], p["teacher"], p["room"],
                 p["start_time"], p["end_time"], week_type=target_week,
-                lesson_type=p.get("lesson_type", "")
+                lesson_type=p.get("lesson_type", ""),
+                subgroup=0,
+                valid_until=None,
+                lesson_type_full=LESSON_TYPE_NAMES.get(p.get("lesson_type", ""), ""),
             )
-            valid_keys.add((day_name, target_week, p["pair_number"]))
+            valid_keys.add((day_name, target_week, p["pair_number"], 0))
 
             if existing:
                 updated += 1
@@ -275,12 +326,15 @@ async def show_attendance_today(message: types.Message):
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
+    university = user[1]
     today = datetime.now(MSK)
     day_name = DAYS_RU[today.weekday()]
     date_str = today.strftime("%d.%m.%Y")
-    week_type = get_current_week_type()
+    date_iso = today.strftime("%Y-%m-%d")
+    week_type = get_current_week_type(university)
 
-    pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
+    pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                         check_date=date_iso)
 
     if not pairs:
         await message.answer(f"📅 На {day_name}, {date_str} ({week_type}) пар нет 🎉")
@@ -299,9 +353,16 @@ async def show_attendance_today(message: types.Message):
         room = pair[4]
         start = pair[5]
         lesson_type = pair[8] if len(pair) > 8 else ""
+        sg = pair[9] if len(pair) > 9 else 0
         lesson_type_full = LESSON_TYPE_NAMES.get(lesson_type, lesson_type)
 
-        text = f"**{num} пара** | {subject}\n"
+        sg_label = ""
+        if sg == 1:
+            sg_label = " [1 пг]"
+        elif sg == 2:
+            sg_label = " [2 пг]"
+
+        text = f"**{num} пара**{sg_label} | {subject}\n"
         if lesson_type_full:
             text += f"📌 {lesson_type_full}\n"
         text += (
@@ -323,12 +384,15 @@ async def show_attendance_tomorrow(message: types.Message):
         await message.answer("Сначала зарегистрируйтесь: /start")
         return
 
+    university = user[1]
     tomorrow = datetime.now(MSK) + timedelta(days=1)
     day_name = DAYS_RU[tomorrow.weekday()]
     date_str = tomorrow.strftime("%d.%m.%Y")
-    week_type = get_week_type_for_date(tomorrow.date())
+    date_iso = tomorrow.strftime("%Y-%m-%d")
+    week_type = get_week_type_for_date(tomorrow.date(), university)
 
-    pairs = get_schedule(user[1], user[2], user[3], day_name, week_type)
+    pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                         check_date=date_iso)
 
     if not pairs:
         await message.answer(f"📅 На {day_name}, {date_str} (завтра, {week_type}) пар нет 🎉")
@@ -347,9 +411,16 @@ async def show_attendance_tomorrow(message: types.Message):
         room = pair[4]
         start = pair[5]
         lesson_type = pair[8] if len(pair) > 8 else ""
+        sg = pair[9] if len(pair) > 9 else 0
         lesson_type_full = LESSON_TYPE_NAMES.get(lesson_type, lesson_type)
 
-        text = f"**{num} пара** | {subject}\n"
+        sg_label = ""
+        if sg == 1:
+            sg_label = " [1 пг]"
+        elif sg == 2:
+            sg_label = " [2 пг]"
+
+        text = f"**{num} пара**{sg_label} | {subject}\n"
         if lesson_type_full:
             text += f"📌 {lesson_type_full}\n"
         text += (
@@ -385,6 +456,38 @@ async def process_attendance(callback: CallbackQuery):
     date_offset = int(parts[3])
     is_broadcast = parts[4] == "1"
 
+    # ⛔ ЗАЩИТА ОТ ЧУЖИХ ОТМЕТОК
+    # Проверяем, что пара принадлежит группе пользователя
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала зарегистрируйтесь: /start", show_alert=True)
+        return
+
+    conn_sql = __import__("sqlite3")  # или просто sqlite3 в импортах
+    import sqlite3 as _sqlite3
+    from database import DB_NAME as _DB_NAME
+    conn = _sqlite3.connect(_DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT university, faculty, group_name
+        FROM schedule WHERE id = ?
+    """, (schedule_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        await callback.answer("❌ Пара не найдена", show_alert=True)
+        return
+
+    s_uni, s_fac, s_grp = row
+    # Сравниваем с данными пользователя
+    if (s_uni, s_fac, s_grp) != (user[1], user[2], user[3]):
+        await callback.answer(
+            "⛔ Эта пара не из вашей группы",
+            show_alert=True
+        )
+        return
+
     status_names = {
         "will":   "✅ Буду на паре",
         "absent": "❌ Не приду",
@@ -394,8 +497,16 @@ async def process_attendance(callback: CallbackQuery):
     day_word = "сегодня" if date_offset == 0 else "завтра"
 
     target_date = (datetime.now(MSK) + timedelta(days=date_offset)).strftime("%Y-%m-%d")
-    set_attendance(callback.from_user.id, schedule_id, status, target_date)
 
+    # Записываем отметку. Функция вернёт True если пара из группы пользователя, False иначе.
+    ok = set_attendance(callback.from_user.id, schedule_id, status, target_date)
+
+    if not ok:
+        # Пара чужая — не записываем, показываем alert
+        await callback.answer("⛔ Эта пара не из вашей группы", show_alert=True)
+        return
+
+    # Всё ок — подтверждаем и продолжаем как раньше
     await callback.answer(f"{status_names.get(status, status)} ({day_word})")
 
     if is_broadcast:
@@ -599,25 +710,9 @@ async def show_help(message: types.Message):
         "📅 Расписание — пары на сегодня/завтра\n"
         "📚 ДЗ — домашние задания\n"
         "📝 Задолженности — твои долги\n"
-        "✅ Посещение — отметить пары\n"
-        "🔄 Обновить расписание — подтянуть свежие данные\n\n"
+        "✅ Посещение — отметить пары\n\n"
         "Если что-то не работает — @hiloetc"
     )
-
-
-@router.message(F.text == "🌐 Сайт РГРТУ")
-async def site_rsreu(message: types.Message):
-    await message.answer("🌐 **Сайт РГРТУ:**\nhttps://rsreu.ru")
-
-
-@router.message(F.text == "🌐 Сайт CDO")
-async def site_cdo(message: types.Message):
-    await message.answer("🌐 **Сайт CDO:**\nhttps://cdo.rsreu.ru")
-
-
-@router.message(F.text == "🌐 Сайт EDU")
-async def site_edu(message: types.Message):
-    await message.answer("🌐 **Сайт EDU:**\nhttps://edu.rsreu.ru")
 
 
 @router.message(Command("my_role"))

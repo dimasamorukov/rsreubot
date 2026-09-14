@@ -6,22 +6,40 @@ from aiogram.types import (
 
 def get_universities_kb():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="РГРТУ")]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-
-
-def get_faculties_kb():
-    return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="ФРТ"), KeyboardButton(text="ФВТ")],
-            [KeyboardButton(text="ФАИТУ"), KeyboardButton(text="ИЭФ")],
-            [KeyboardButton(text="ФЭ")],
+            [KeyboardButton(text="РГРТУ")],
+            [KeyboardButton(text="РГУ")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
+
+
+def get_faculties_kb(university: str = "РГРТУ"):
+    from config import FACULTIES_RGRTU, FACULTIES_RGU
+
+    if university == "РГУ":
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="ФЭСУ"), KeyboardButton(text="ИФМиКН")],
+                [KeyboardButton(text="ИЕН"), KeyboardButton(text="ИИЯ")],
+                [KeyboardButton(text="ФФКС"), KeyboardButton(text="ИИФПН")],
+                [KeyboardButton(text="ФРФНК"), KeyboardButton(text="ИППСР")],
+                [KeyboardButton(text="ЮИ")],
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+    else:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="ФРТ"), KeyboardButton(text="ФВТ")],
+                [KeyboardButton(text="ФАИТУ"), KeyboardButton(text="ИЭФ")],
+                [KeyboardButton(text="ФЭ")],
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
 
 
 def get_schedule_menu_kb():
@@ -44,15 +62,27 @@ def get_attendance_menu_kb():
         resize_keyboard=True
     )
 
-def get_main_menu(is_admin=False):
+
+def get_main_menu(is_admin=False, university=None):
+    """
+    Главное меню.
+    is_admin — показывать ли кнопки старосты
+    university — если "РГРТУ", добавляем кнопку «🔄 Обновить расписание»
+    """
     buttons = [
         [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="📚 ДЗ")],
         [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="✅ Посещение")],
-        [KeyboardButton(text="🔄 Обновить расписание")],
-        [KeyboardButton(text="📝 Задолженности"), KeyboardButton(text="ℹ️ Помощь")],
     ]
+
+    # Кнопка обновления расписания — ТОЛЬКО для РГРТУ
+    if university == "РГРТУ":
+        buttons.append([KeyboardButton(text="🔄 Обновить расписание")])
+
+    buttons.append([KeyboardButton(text="📝 Задолженности"), KeyboardButton(text="ℹ️ Помощь")])
+
     if is_admin:
         buttons.append([KeyboardButton(text="👑 Панель старосты"), KeyboardButton(text="📊 Посещаемость")])
+
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
@@ -66,7 +96,6 @@ def get_homework_actions_kb(homework_id):
 
 
 def get_homework_starosta_kb(homework_id):
-    """Клавиатура для старосты: статус + удаление"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -89,27 +118,7 @@ def get_homework_confirm_delete_kb(homework_id):
     )
 
 
-def get_attendance_kb(schedule_id, date_offset=0):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Буду", callback_data=f"att_will_{schedule_id}_{date_offset}"),
-                InlineKeyboardButton(text="❌ Не приду", callback_data=f"att_absent_{schedule_id}_{date_offset}"),
-            ],
-            [
-                InlineKeyboardButton(text="🤒 Заболел", callback_data=f"att_sick_{schedule_id}_{date_offset}"),
-                InlineKeyboardButton(text="⏰ Задержусь", callback_data=f"att_late_{schedule_id}_{date_offset}"),
-            ]
-        ]
-    )
-
-
 def get_profile_edit_kb(notify_pairs: bool = True, notify_attendance: bool = True):
-    """
-    Клавиатура профиля.
-    notify_pairs — напоминания о парах за 30 минут
-    notify_attendance — рассылка «Отметь явку на завтра»
-    """
     pairs_text = "🔔 Пары: ВКЛ" if notify_pairs else "🔕 Пары: ВЫКЛ"
     attendance_text = "📋 Явка: ВКЛ" if notify_attendance else "📋 Явка: ВЫКЛ"
 
@@ -136,7 +145,6 @@ def get_admin_panel_kb():
             [KeyboardButton(text="➕ ДЗ"), KeyboardButton(text="➕ Пара")],
             [KeyboardButton(text="👥 Список группы"), KeyboardButton(text="📊 Посещаемость")],
             [KeyboardButton(text="📜 Логи посещаемости")],
-            [KeyboardButton(text="🔄 Обновить")],
             [KeyboardButton(text="🔙 Назад")],
         ],
         resize_keyboard=True
@@ -210,7 +218,6 @@ def get_group_list_actions_kb():
 
 
 def get_users_pagination_kb(page: int, total_pages: int):
-    """Пагинация списка пользователей"""
     rows = []
     nav_row = []
     if page > 0:
@@ -223,47 +230,7 @@ def get_users_pagination_kb(page: int, total_pages: int):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_user_info_kb(user_id: int):
-    """Кнопки под информацией о пользователе"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"user_delete_{user_id}")],
-            [InlineKeyboardButton(text="🔙 Закрыть", callback_data="user_close")],
-        ]
-    )
-
-
-def get_user_delete_confirm_kb(user_id: int):
-    """Подтверждение удаления пользователя"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"user_delete_yes_{user_id}"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data=f"user_delete_no_{user_id}"),
-            ]
-        ]
-    )
-
-
-def get_broadcast_confirm_kb(scope: str):
-    """
-    Подтверждение рассылки.
-    scope = "all" (админ) или "group" (староста)
-    """
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Отправить", callback_data=f"broadcast_yes_{scope}"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data=f"broadcast_no_{scope}"),
-            ]
-        ]
-    )
-
 def get_user_info_kb(user_id: int, is_starosta: bool = False):
-    """
-    Кнопки под информацией о пользователе.
-    Если пользователь — староста, добавляется кнопка снятия роли.
-    """
     rows = []
 
     if is_starosta:
@@ -285,8 +252,29 @@ def get_user_info_kb(user_id: int, is_starosta: bool = False):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def get_user_delete_confirm_kb(user_id: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"user_delete_yes_{user_id}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"user_delete_no_{user_id}"),
+            ]
+        ]
+    )
+
+
+def get_broadcast_confirm_kb(scope: str):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Отправить", callback_data=f"broadcast_yes_{scope}"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"broadcast_no_{scope}"),
+            ]
+        ]
+    )
+
+
 def get_remove_starosta_confirm_kb(user_id: int):
-    """Подтверждение снятия роли старосты"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -302,8 +290,8 @@ def get_remove_starosta_confirm_kb(user_id: int):
         ]
     )
 
+
 def get_attendance_kb(schedule_id, date_offset=0):
-    """Маленькая клавиатура для РУЧНОЙ явки. broadcast=0."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -319,9 +307,6 @@ def get_attendance_kb(schedule_id, date_offset=0):
 
 
 def get_tomorrow_attendance_all_kb(pairs: list, user_answers: dict = None):
-    """
-    Большая клавиатура для РАССЫЛКИ. broadcast=1.
-    """
     user_answers = user_answers or {}
     rows = []
     for pair in pairs:
@@ -353,29 +338,73 @@ def get_tomorrow_attendance_all_kb(pairs: list, user_answers: dict = None):
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def get_tomorrow_attendance_kb(schedule_id, date_offset=1):
-    """Inline-клавиатура для отметки на завтра (устаревшая, используется редко)."""
+
+# ============ МАСТЕР ДОБАВЛЕНИЯ ПАРЫ v2 ============
+
+def get_week_type_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔵 Числитель", callback_data="pw_num")],
+            [InlineKeyboardButton(text="🟢 Знаменатель", callback_data="pw_den")],
+            [InlineKeyboardButton(text="⚪ Каждую неделю", callback_data="pw_any")],
+        ]
+    )
+
+
+def get_days_kb_full():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="✅ Буду",
-                    callback_data=f"att_will_{schedule_id}_{date_offset}_0"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Не приду",
-                    callback_data=f"att_absent_{schedule_id}_{date_offset}_0"
-                ),
+                InlineKeyboardButton(text="Пн", callback_data="pd_Понедельник"),
+                InlineKeyboardButton(text="Вт", callback_data="pd_Вторник"),
+                InlineKeyboardButton(text="Ср", callback_data="pd_Среда"),
             ],
             [
-                InlineKeyboardButton(
-                    text="🤒 Заболел",
-                    callback_data=f"att_sick_{schedule_id}_{date_offset}_0"
-                ),
-                InlineKeyboardButton(
-                    text="⏰ Задержусь",
-                    callback_data=f"att_late_{schedule_id}_{date_offset}_0"
-                ),
-            ]
+                InlineKeyboardButton(text="Чт", callback_data="pd_Четверг"),
+                InlineKeyboardButton(text="Пт", callback_data="pd_Пятница"),
+                InlineKeyboardButton(text="Сб", callback_data="pd_Суббота"),
+            ],
+        ]
+    )
+
+
+def get_lesson_type_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📖 Лекция", callback_data="lt_Лекция"),
+                InlineKeyboardButton(text="🔬 Лабораторная", callback_data="lt_Лабораторная"),
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Практика", callback_data="lt_Практика"),
+                InlineKeyboardButton(text="💬 Семинар", callback_data="lt_Семинар"),
+            ],
+            [
+                InlineKeyboardButton(text="📝 Курсовая", callback_data="lt_Курсовая"),
+            ],
+        ]
+    )
+
+
+def get_subgroup_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="1 подгруппа", callback_data="sg_1"),
+                InlineKeyboardButton(text="2 подгруппа", callback_data="sg_2"),
+            ],
+            [
+                InlineKeyboardButton(text="Для всех (-)", callback_data="sg_0"),
+            ],
+        ]
+    )
+
+
+def get_period_end_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="До конца семестра (31.12)", callback_data="pe_semester")],
+            [InlineKeyboardButton(text="До конца месяца", callback_data="pe_month")],
+            [InlineKeyboardButton(text="Ввести дату вручную", callback_data="pe_manual")],
         ]
     )

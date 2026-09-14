@@ -9,7 +9,7 @@ import re
 
 from parser import fetch_schedule_from_api, parse_schedule_for_day
 from database import (
-    get_user, add_homework, add_schedule_pair, get_all_groups, 
+    get_user, add_homework, add_schedule_pair, get_all_groups,
     get_attendance_for_day_grouped,
     get_attendance_logs_week,
     delete_schedule_for_day, set_role, clear_schedule_for_group,
@@ -23,7 +23,10 @@ from database import (
 from keyboards import (
     get_admin_panel_kb, get_main_menu,
     get_days_kb, get_confirm_kb,
-    get_group_members_delete_kb, get_group_list_actions_kb, get_broadcast_confirm_kb, get_remove_starosta_confirm_kb,
+    get_group_members_delete_kb, get_group_list_actions_kb,
+    get_broadcast_confirm_kb, get_remove_starosta_confirm_kb,
+    get_week_type_kb, get_days_kb_full,
+    get_lesson_type_kb, get_subgroup_kb, get_period_end_kb,
 )
 from config import (
     ADMIN_IDS, get_current_week_type, get_week_type_for_date
@@ -52,12 +55,7 @@ def _short_name(full_name):
     return full_name
 
 
-class AdminActions(StatesGroup):
-    waiting_homework = State()
-    waiting_pair = State()
-
-
-# ============ МАСТЕР ДОБАВЛЕНИЯ ПАРЫ ============
+# ============ МАСТЕР ДОБАВЛЕНИЯ ПАРЫ v2 ============
 
 class AddPair(StatesGroup):
     choosing_week_type = State()
@@ -65,10 +63,13 @@ class AddPair(StatesGroup):
     entering_number = State()
     entering_time = State()
     entering_subject = State()
+    choosing_lesson_type = State()
     entering_teacher = State()
     entering_room = State()
+    choosing_subgroup = State()
+    choosing_period_end = State()
+    entering_manual_date = State()
     confirming = State()
-    confirming_repeat = State()
 
 
 @router.message(F.text == "➕ Пара")
@@ -77,32 +78,43 @@ async def add_pair_start(message, state):
     if not user or user[5] != 'starosta':
         await message.answer("⛔ Только староста может добавлять пары.")
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Числитель", callback_data="weektype_числитель")],
-        [InlineKeyboardButton(text="Знаменатель", callback_data="weektype_знаменатель")],
-        [InlineKeyboardButton(text="Каждую неделю", callback_data="weektype_any")],
-    ])
-    await message.answer("📅 **Мастер добавления пары**\n\nВыбери **тип недели**:", parse_mode="Markdown", reply_markup=kb)
+
+    await state.clear()
+    await message.answer(
+        "📅 **Мастер добавления пары**\n\n"
+        "**Шаг 1/9.** Выбери **тип недели**:",
+        parse_mode="Markdown",
+        reply_markup=get_week_type_kb()
+    )
     await state.set_state(AddPair.choosing_week_type)
 
 
-@router.callback_query(F.data.startswith("weektype_"), AddPair.choosing_week_type)
+@router.callback_query(F.data.startswith("pw_"), AddPair.choosing_week_type)
 async def pair_choose_week_type(callback, state):
-    week_type = callback.data.replace("weektype_", "")
-    if week_type == "any":
-        week_type = None
+    mapping = {"pw_num": "числитель", "pw_den": "знаменатель", "pw_any": None}
+    week_type = mapping.get(callback.data)
     await state.update_data(week_type=week_type)
+
     label = week_type if week_type else "каждую неделю"
-    await callback.message.edit_text(f"📅 Тип недели: **{label}**\n\nВыбери **день недели**:", parse_mode="Markdown", reply_markup=get_days_kb("pairday"))
+    await callback.message.edit_text(
+        f"📅 Тип недели: **{label}**\n\n"
+        f"**Шаг 2/9.** Выбери **день недели**:",
+        parse_mode="Markdown",
+        reply_markup=get_days_kb_full()
+    )
     await state.set_state(AddPair.choosing_day)
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("pairday_"), AddPair.choosing_day)
+@router.callback_query(F.data.startswith("pd_"), AddPair.choosing_day)
 async def pair_choose_day(callback, state):
-    day = callback.data.replace("pairday_", "")
+    day = callback.data.replace("pd_", "")
     await state.update_data(day=day)
-    await callback.message.edit_text(f"📅 День: **{day}**\n\nВведи **номер пары** числом:", parse_mode="Markdown")
+    await callback.message.edit_text(
+        f"📅 День: **{day}**\n\n"
+        f"**Шаг 3/9.** Введи **номер пары** числом (1–8):",
+        parse_mode="Markdown"
+    )
     await state.set_state(AddPair.entering_number)
     await callback.answer()
 
@@ -110,51 +122,195 @@ async def pair_choose_day(callback, state):
 @router.message(AddPair.entering_number)
 async def pair_enter_number(message, state):
     text = message.text.strip()
-    if not text.isdigit():
-        await message.answer("❌ Номер пары должен быть числом.")
+    if not text.isdigit() or not (1 <= int(text) <= 8):
+        await message.answer("❌ Номер пары — число от 1 до 8.")
         return
     await state.update_data(pair_number=int(text))
-    await message.answer("⏰ Введи **время пары** (`09:55-11:30` или `09:55`):", parse_mode="Markdown")
+    await message.answer(
+        "⏰ **Шаг 4/9.** Введи **время начала пары** в формате `ЧЧ:ММ`\n"
+        "Например: `09:55`",
+        parse_mode="Markdown"
+    )
     await state.set_state(AddPair.entering_time)
 
 
 @router.message(AddPair.entering_time)
 async def pair_enter_time(message, state):
-    await state.update_data(time=message.text.strip())
-    await message.answer("📖 Введи **название предмета**:")
+    text = message.text.strip()
+    if not re.match(r"^\d{1,2}:\d{2}$", text):
+        await message.answer("❌ Формат: `ЧЧ:ММ`, например `09:55`", parse_mode="Markdown")
+        return
+    await state.update_data(start_time=text)
+    await message.answer(
+        "📖 **Шаг 5/9.** Введи **название предмета**:\n"
+        "Например: `Математический анализ`",
+        parse_mode="Markdown"
+    )
     await state.set_state(AddPair.entering_subject)
 
 
 @router.message(AddPair.entering_subject)
 async def pair_enter_subject(message, state):
     await state.update_data(subject=message.text.strip())
-    await message.answer("👤 Введи **преподавателя** (или `-`):")
+    await message.answer(
+        "📌 **Шаг 6/9.** Выбери **тип занятия**:",
+        parse_mode="Markdown",
+        reply_markup=get_lesson_type_kb()
+    )
+    await state.set_state(AddPair.choosing_lesson_type)
+
+
+@router.callback_query(F.data.startswith("lt_"), AddPair.choosing_lesson_type)
+async def pair_choose_lesson_type(callback, state):
+    lesson_type_full = callback.data.replace("lt_", "")
+    short_map = {
+        "Лекция": "Лек.",
+        "Лабораторная": "Лаб.",
+        "Практика": "Пр.",
+        "Семинар": "Сем.",
+        "Курсовая": "Курс.",
+    }
+    await state.update_data(
+        lesson_type=short_map.get(lesson_type_full, ""),
+        lesson_type_full=lesson_type_full
+    )
+    await callback.message.edit_text(
+        f"📌 Тип: **{lesson_type_full}**\n\n"
+        f"**Шаг 7/9.** Введи **ФИО преподавателя** (или `-`):",
+        parse_mode="Markdown"
+    )
     await state.set_state(AddPair.entering_teacher)
+    await callback.answer()
 
 
 @router.message(AddPair.entering_teacher)
 async def pair_enter_teacher(message, state):
-    await state.update_data(teacher=message.text.strip())
-    await message.answer("🚪 Введи **аудиторию** (или `-`):")
+    teacher = message.text.strip()
+    if teacher == "-":
+        teacher = ""
+    await state.update_data(teacher=teacher)
+    await message.answer(
+        "🚪 **Шаг 8/9.** Введи **номер аудитории** (или `-`):",
+        parse_mode="Markdown"
+    )
     await state.set_state(AddPair.entering_room)
 
 
 @router.message(AddPair.entering_room)
 async def pair_enter_room(message, state):
-    await state.update_data(room=message.text.strip())
+    room = message.text.strip()
+    if room == "-":
+        room = ""
+    await state.update_data(room=room)
+    await message.answer(
+        "👥 **Шаг 9/9.** Для какой **подгруппы** эта пара?",
+        parse_mode="Markdown",
+        reply_markup=get_subgroup_kb()
+    )
+    await state.set_state(AddPair.choosing_subgroup)
+
+
+@router.callback_query(F.data.startswith("sg_"), AddPair.choosing_subgroup)
+async def pair_choose_subgroup(callback, state):
+    subgroup = int(callback.data.replace("sg_", ""))
+    await state.update_data(subgroup=subgroup)
+
+    label = "для всех" if subgroup == 0 else f"{subgroup} подгруппа"
+    await callback.message.edit_text(
+        f"👥 Подгруппа: **{label}**\n\n"
+        f"📆 До какого **периода** действует эта пара?",
+        parse_mode="Markdown",
+        reply_markup=get_period_end_kb()
+    )
+    await state.set_state(AddPair.choosing_period_end)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pe_"), AddPair.choosing_period_end)
+async def pair_choose_period_end(callback, state):
+    action = callback.data.replace("pe_", "")
+    today = datetime.now(MSK)
+
+    if action == "semester":
+        year = today.year if today.month <= 8 else today.year + 1
+        valid_until = f"{year}-12-31"
+        await state.update_data(valid_until=valid_until)
+        await _pair_show_confirm(callback.message, state, edit=True)
+        await callback.answer()
+        return
+
+    if action == "month":
+        if today.month == 12:
+            valid_until = f"{today.year}-12-31"
+        else:
+            next_month = today.replace(day=1, month=today.month + 1)
+            last_day = (next_month - timedelta(days=1)).day
+            valid_until = f"{today.year}-{today.month:02d}-{last_day:02d}"
+        await state.update_data(valid_until=valid_until)
+        await _pair_show_confirm(callback.message, state, edit=True)
+        await callback.answer()
+        return
+
+    if action == "manual":
+        await callback.message.edit_text(
+            "📆 Введи дату окончания в формате `ДД.ММ.ГГГГ`\n"
+            "Например: `25.12.2026`",
+            parse_mode="Markdown"
+        )
+        await state.set_state(AddPair.entering_manual_date)
+        await callback.answer()
+        return
+
+
+@router.message(AddPair.entering_manual_date)
+async def pair_enter_manual_date(message, state):
+    text = message.text.strip()
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", text)
+    if not m:
+        await message.answer("❌ Формат: `ДД.ММ.ГГГГ`, например `25.12.2026`", parse_mode="Markdown")
+        return
+    day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        valid_until = f"{year:04d}-{month:02d}-{day:02d}"
+        datetime.strptime(valid_until, "%Y-%m-%d")
+    except ValueError:
+        await message.answer("❌ Некорректная дата.")
+        return
+    await state.update_data(valid_until=valid_until)
+    await _pair_show_confirm(message, state, edit=False)
+
+
+async def _pair_show_confirm(message_or_msg, state, edit=False):
     data = await state.get_data()
+
     week_label = data.get('week_type') or "каждую неделю"
+    sg = data.get('subgroup', 0)
+    sg_label = "для всех" if sg == 0 else f"{sg} подгруппа"
+    valid_until = data.get('valid_until') or "—"
+    lesson_full = data.get('lesson_type_full') or "—"
+
     text = (
-        f"Проверь пару:\n\n"
+        f"**Проверь пару:**\n\n"
         f"📆 Неделя: **{week_label}**\n"
         f"📅 День: **{data['day']}**\n"
         f"🔢 Номер: **{data['pair_number']}**\n"
-        f"⏰ Время: **{data['time']}**\n"
+        f"⏰ Начало: **{data['start_time']}**\n"
         f"📖 Предмет: **{data['subject']}**\n"
-        f"👤 Преподаватель: **{data['teacher']}**\n"
-        f"🚪 Аудитория: **{data['room']}**\n\nСохранить?"
+        f"📌 Тип: **{lesson_full}**\n"
+        f"👤 Преподаватель: **{data.get('teacher') or '—'}**\n"
+        f"🚪 Аудитория: **{data.get('room') or '—'}**\n"
+        f"👥 Подгруппа: **{sg_label}**\n"
+        f"📆 Действует до: **{valid_until}**\n\n"
+        f"Сохранить?"
     )
-    await message.answer(text, parse_mode="Markdown", reply_markup=get_confirm_kb("pairconfirm"))
+
+    kb = get_confirm_kb("pairconfirm")
+
+    if edit:
+        await message_or_msg.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await message_or_msg.answer(text, parse_mode="Markdown", reply_markup=kb)
+
     await state.set_state(AddPair.confirming)
 
 
@@ -162,55 +318,43 @@ async def pair_enter_room(message, state):
 async def pair_confirm_yes(callback, state):
     data = await state.get_data()
     user = get_user(callback.from_user.id)
-    await state.update_data(university=user[1], faculty=user[2], group_name=user[3])
-    await callback.message.edit_text(
-        f"📅 День: **{data['day']}**\n🔢 Номер: **{data['pair_number']}**\n⏰ Время: **{data['time']}**\n📖 Предмет: **{data['subject']}**\n\nСохранить?",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Сохранить", callback_data="pairrepeat_yes"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="pairrepeat_no"),
-        ]])
-    )
-    await state.set_state(AddPair.confirming_repeat)
-    await callback.answer()
 
-
-@router.callback_query(F.data == "pairrepeat_yes", AddPair.confirming_repeat)
-async def pair_repeat_yes(callback, state):
-    data = await state.get_data()
     week_type = data.get('week_type')
-    if week_type is None:
-        for wt in ["числитель", "знаменатель"]:
-            add_schedule_pair(
-                university=data['university'], faculty=data['faculty'], group_name=data['group_name'],
-                day=data['day'], pair_num=data['pair_number'], subject=data['subject'],
-                teacher=data['teacher'], room=data['room'], start=data['time'], end="",
-                week_type=wt
-            )
-        week_label = "каждую неделю"
-    else:
+    weeks = [week_type] if week_type else ["числитель", "знаменатель"]
+
+    for wt in weeks:
         add_schedule_pair(
-            university=data['university'], faculty=data['faculty'], group_name=data['group_name'],
-            day=data['day'], pair_num=data['pair_number'], subject=data['subject'],
-            teacher=data['teacher'], room=data['room'], start=data['time'], end="",
-            week_type=week_type
+            university=user[1], faculty=user[2], group_name=user[3],
+            day=data['day'], pair_num=data['pair_number'],
+            subject=data['subject'],
+            teacher=data.get('teacher', ''),
+            room=data.get('room', ''),
+            start=data['start_time'], end="",
+            week_type=wt,
+            lesson_type=data.get('lesson_type', ''),
+            subgroup=data.get('subgroup', 0),
+            valid_until=data.get('valid_until'),
+            lesson_type_full=data.get('lesson_type_full', ''),
         )
-        week_label = week_type
+
+    week_label = week_type if week_type else "каждую неделю"
+    sg = data.get('subgroup', 0)
+    sg_label = "для всех" if sg == 0 else f"{sg} подгруппа"
+
     await callback.message.edit_text(
-        f"✅ Пара сохранена!\n\n📆 Неделя: **{week_label}**\n📅 {data['day']}, {data['pair_number']} пара\n📖 {data['subject']}\n⏰ {data['time']}",
+        f"✅ **Пара сохранена!**\n\n"
+        f"📆 Неделя: **{week_label}**\n"
+        f"📅 {data['day']}, {data['pair_number']} пара\n"
+        f"📌 {data.get('lesson_type_full', '')}\n"
+        f"📖 {data['subject']}\n"
+        f"⏰ {data['start_time']}\n"
+        f"👥 {sg_label}\n"
+        f"📆 До: {data.get('valid_until') or '—'}",
         parse_mode="Markdown"
     )
     await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb())
     await state.clear()
     await callback.answer("Сохранено")
-
-
-@router.callback_query(F.data == "pairrepeat_no", AddPair.confirming_repeat)
-async def pair_repeat_no(callback, state):
-    await callback.message.edit_text("❌ Отменено.")
-    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb())
-    await state.clear()
-    await callback.answer("Отменено")
 
 
 @router.callback_query(F.data == "pairconfirm_no", AddPair.confirming)
@@ -219,7 +363,6 @@ async def pair_confirm_no(callback, state):
     await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb())
     await state.clear()
     await callback.answer("Отменено")
-
 
 
 # ============ ПАНЕЛЬ СТАРОСТЫ ============
@@ -237,8 +380,11 @@ async def admin_panel(message):
 async def back_to_menu(message):
     user = get_user(message.from_user.id)
     is_admin = user[5] == 'starosta' if user else False
-    await message.answer("🏠 Главное меню:", reply_markup=get_main_menu(is_admin))
-
+    university = user[1] if user else None
+    await message.answer(
+        "🏠 Главное меню:",
+        reply_markup=get_main_menu(is_admin, university=university)
+    )
 
 # ============ МАСТЕР ДОБАВЛЕНИЯ ДЗ ============
 
@@ -357,7 +503,7 @@ async def hw_confirm_no(callback, state):
     await callback.answer("Отменено")
 
 
-# ============ ПОСЕЩАЕМОСТЬ (компактная) ============
+# ============ ПОСЕЩАЕМОСТЬ ============
 
 @router.message(F.text == "📊 Посещаемость")
 async def show_group_attendance(message):
@@ -389,7 +535,7 @@ async def show_group_attendance(message):
         await message.answer(text, parse_mode="Markdown")
 
 
-# ============ ЛОГИ ПОСЕЩАЕМОСТИ ЗА НЕДЕЛЮ ============
+# ============ ЛОГИ ПОСЕЩАЕМОСТИ ============
 
 @router.message(F.text == "📜 Логи посещаемости")
 async def show_attendance_logs(message):
@@ -406,28 +552,22 @@ async def show_attendance_logs(message):
         await message.answer("📜 За последнюю неделю никто не отмечался.")
         return
 
-    # Группируем: {date: {full_name: {pair_num: status}}}
     logs_by_date = OrderedDict()
     for date, full_name, pair_num, subject, status in rows:
         if date not in logs_by_date:
             logs_by_date[date] = OrderedDict()
         if full_name not in logs_by_date[date]:
             logs_by_date[date][full_name] = {}
-        # Если несколько отметок по одной паре — берём последнюю
         logs_by_date[date][full_name][pair_num] = status
 
     text = f"📜 <b>Логи посещаемости группы {user[3]}</b>\n"
     text += f"Период: последние 7 дней\n\n"
 
     status_icons = {
-        "will": "✅",
-        "absent": "❌",
-        "sick": "🤒",
-        "late": "⏰"
+        "will": "✅", "absent": "❌", "sick": "🤒", "late": "⏰"
     }
 
     for date, students in logs_by_date.items():
-        # Форматируем дату: 2026-09-13 → 13.09.2026 (Сб)
         try:
             dt = datetime.strptime(date, "%Y-%m-%d")
             day_ru = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][dt.weekday()]
@@ -437,22 +577,17 @@ async def show_attendance_logs(message):
 
         text += f"📅 <b>{date_display}</b>\n"
 
-        # Сортируем студентов по ФИО
         for full_name in sorted(students.keys()):
             short = _short_name(full_name)
             pairs_info = []
-
-            # Сортируем пары по номеру
             for pair_num in sorted(students[full_name].keys()):
                 status = students[full_name][pair_num]
                 icon = status_icons.get(status, "?")
                 pairs_info.append(f"{pair_num} пара — {icon}")
-
             text += f"  <b>{short}</b>: {', '.join(pairs_info)}\n"
 
         text += "\n"
 
-    # Разбиваем, если длинное
     if len(text) > 4000:
         for i in range(0, len(text), 4000):
             await message.answer(text[i:i+4000], parse_mode="HTML")
@@ -481,7 +616,7 @@ async def make_starosta(message):
         await message.answer(f"❌ Пользователь с ID {target_id} не зарегистрирован.")
         return
     set_role(target_id, "starosta")
-    await message.answer(f"✅ {user[4]} (ID {target_id}) теперь староста.\nГруппа: {user[3]}")
+    await message.answer(f"✅ {user[4]} (ID {target_id}) теперь староста.\nВУЗ: {user[1]}\nГруппа: {user[3]}")
 
 
 # ============ СПИСОК ГРУППЫ ============
@@ -593,49 +728,6 @@ async def delete_member_confirm(callback, bot: Bot):
     await callback.message.edit_text(f"✅ Студент **{target_name}** удалён.\n\n🗑 **Оставшиеся студенты:**\n_Нажми ❌, чтобы удалить ещё одного._", parse_mode="Markdown", reply_markup=get_group_members_delete_kb(members))
 
 
-# ============ ОБНОВЛЕНИЕ РАСПИСАНИЯ ============
-
-@router.message(F.text == "🔄 Обновить")
-async def update_schedule_from_api(message):
-    user = get_user(message.from_user.id)
-    if not user or user[5] != 'starosta':
-        await message.answer("⛔ Только староста может обновлять расписание.")
-        return
-    await message.answer("🔄 Загружаю расписание с сайта...")
-    today = datetime.now(MSK)
-    date_iso = today.strftime("%Y-%m-%d")
-    data = await fetch_schedule_from_api(user[3], date_iso)
-    if not data:
-        await message.answer("❌ Не удалось получить расписание.")
-        return
-    saved = 0
-    updated = 0
-    valid_keys = set()
-    for offset in range(14):
-        target = today + timedelta(days=offset)
-        day_name = DAYS_RU[target.weekday()]
-        target_iso = target.strftime("%Y-%m-%d")
-        target_week = get_week_type_for_date(target.date())
-        pairs = parse_schedule_for_day(data, target_iso, target_week)
-        for p in pairs:
-            existing = get_schedule_pair_by_key(user[1], user[2], user[3], day_name, target_week, p["pair_number"])
-            upsert_schedule_pair(
-                user[1], user[2], user[3], day_name, p["pair_number"],
-                p["subject"], p["teacher"], p["room"],
-                p["start_time"], p["end_time"], week_type=target_week,
-                lesson_type=p.get("lesson_type", "")
-            )
-            valid_keys.add((day_name, target_week, p["pair_number"]))
-            if existing:
-                updated += 1
-            else:
-                saved += 1
-    deleted = delete_orphan_schedule_pairs(user[1], user[2], user[3], valid_keys)
-    await message.answer(
-        f"✅ Расписание обновлено!\n📚 Новых пар: **{saved}**\n♻️ Обновлено: **{updated}**\n🗑 Удалено: **{deleted}**",
-        parse_mode="Markdown"
-    )
-
 # ============ БЛОКИРОВКА ============
 
 def _is_admin(user_id):
@@ -723,7 +815,7 @@ async def unban_command(message):
         await message.answer(f"✅ Пользователь `{target_id}` разбанен.", parse_mode="Markdown")
 
 
-# ============ АДМИН: СПИСОК ВСЕХ ПОЛЬЗОВАТЕЛЕЙ ============
+# ============ /users, /user, /banlist ============
 
 from database import get_all_users, count_users, get_user_details
 from keyboards import (
@@ -736,7 +828,6 @@ USERS_PER_PAGE = 10
 
 
 def _escape_html(text):
-    """Экранирует HTML-спецсимволы"""
     if not text:
         return ""
     return (
@@ -748,6 +839,7 @@ def _escape_html(text):
 
 def _format_user_row(user):
     user_id = user[0]
+    university = user[1]
     group_name = user[3]
     full_name = user[4]
     role = user[5]
@@ -757,6 +849,7 @@ def _format_user_row(user):
     role_icon = "👑" if role == "starosta" else "🎓"
     full_name_safe = _escape_html(full_name)
     group_safe = _escape_html(group_name or "")
+    uni_safe = _escape_html(university or "")
 
     if username:
         username_str = f"@{_escape_html(username)}"
@@ -766,7 +859,8 @@ def _format_user_row(user):
     return (
         f"{role_icon} <b>{full_name_safe}</b>\n"
         f"   {username_str}\n"
-        f"   🆔 <code>{user_id}</code> | {group_safe} | {registered_at[:10]}"
+        f"   🎓 {uni_safe} | {group_safe}\n"
+        f"   🆔 <code>{user_id}</code> | {registered_at[:10]}"
     )
 
 
@@ -803,7 +897,6 @@ def _format_user_details(user):
 
 
 async def _send_users_page(message: types.Message, page: int):
-    """Отправляет страницу со списком пользователей"""
     total = count_users()
     total_pages = (total + USERS_PER_PAGE - 1) // USERS_PER_PAGE
 
@@ -835,11 +928,8 @@ async def _send_users_page(message: types.Message, page: int):
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
-# ============ КОМАНДА /users ============
-
 @router.message(Command("users"))
 async def cmd_users(message: types.Message):
-    """Список всех зарегистрированных пользователей"""
     if not _is_admin(message.from_user.id):
         await message.answer("⛔ Только админ может смотреть список.")
         return
@@ -852,11 +942,8 @@ async def cmd_users(message: types.Message):
     await _send_users_page(message, page=0)
 
 
-# ============ КОМАНДА /user ============
-
 @router.message(Command("user"))
 async def cmd_user(message: types.Message):
-    """Подробная информация о пользователе: /user <user_id>"""
     if not _is_admin(message.from_user.id):
         await message.answer("⛔ Только админ может смотреть.")
         return
@@ -880,27 +967,21 @@ async def cmd_user(message: types.Message):
         await message.answer(f"❌ Пользователь с ID <code>{target_id}</code> не зарегистрирован.", parse_mode="HTML")
         return
 
-
-    
     text = _format_user_details(user)
     is_star = user[5] == 'starosta'
     await message.answer(text, parse_mode="HTML", reply_markup=get_user_info_kb(target_id, is_starosta=is_star))
 
-
-# ============ ПАГИНАЦИЯ ============
 
 @router.callback_query(F.data.startswith("users_page_"))
 async def users_page_nav(callback: types.CallbackQuery):
     if not _is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет прав.", show_alert=True)
         return
-
     try:
         page = int(callback.data.replace("users_page_", ""))
     except ValueError:
         await callback.answer("Ошибка", show_alert=True)
         return
-
     await _send_users_page(callback.message, page)
     await callback.answer()
 
@@ -924,7 +1005,6 @@ async def user_delete_yes(callback: types.CallbackQuery, bot: Bot):
     if not _is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет прав.", show_alert=True)
         return
-
     try:
         target_id = int(callback.data.replace("user_delete_yes_", ""))
     except ValueError:
@@ -980,7 +1060,6 @@ async def user_delete_start(callback: types.CallbackQuery):
     if not _is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет прав.", show_alert=True)
         return
-
     try:
         target_id = int(callback.data.replace("user_delete_", ""))
     except ValueError:
@@ -1008,11 +1087,8 @@ async def user_delete_start(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ============ КОМАНДА /banlist ============
-
 @router.message(Command("banlist"))
 async def banlist_command(message: types.Message):
-    """Список забаненных"""
     if not _is_admin(message.from_user.id):
         await message.answer("⛔ Только админ может смотреть список.")
         return
@@ -1032,7 +1108,6 @@ async def banlist_command(message: types.Message):
                 text += f" | @{_escape_html(username)}"
             else:
                 text += f"• @{_escape_html(username)}"
-
         if reason:
             text += f"\n  <b>Причина:</b> {_escape_html(reason)}"
         text += f"\n  <i>{banned_at[:16]}</i>\n\n"
@@ -1048,7 +1123,6 @@ async def banlist_command(message: types.Message):
 
 # ============ РАССЫЛКА ============
 
-from aiogram import F
 from database import get_all_user_ids, get_group_user_ids
 
 
@@ -1059,20 +1133,15 @@ class BroadcastStates(StatesGroup):
     confirming_group = State()
 
 
-# ============ АДМИН: РАССЫЛКА ВСЕМ ============
-
 @router.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message, state: FSMContext):
-    """Рассылка всем пользователям (только для админа)"""
     if not _is_admin(message.from_user.id):
         await message.answer("⛔ Только админ может делать рассылку.")
         return
-
     total = count_users()
     if total == 0:
         await message.answer("📋 В боте нет зарегистрированных пользователей.")
         return
-
     await message.answer(
         f"📢 <b>Рассылка всем пользователям</b>\n\n"
         f"👥 Получателей: <b>{total}</b>\n\n"
@@ -1085,20 +1154,15 @@ async def cmd_broadcast(message: types.Message, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_message_all)
 async def broadcast_all_preview(message: types.Message, state: FSMContext):
-    """Сохраняем сообщение и показываем подтверждение"""
     if message.text == "/cancel":
         await state.clear()
         await message.answer("❌ Рассылка отменена.")
         return
-
-    # Сохраняем ID сообщения и чата
     await state.update_data(
         from_chat_id=message.chat.id,
         message_id=message.message_id,
     )
-
     total = count_users()
-
     await message.answer(
         f"📢 <b>Подтверди рассылку</b>\n\n"
         f"👥 Получателей: <b>{total}</b>\n\n"
@@ -1111,13 +1175,12 @@ async def broadcast_all_preview(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "broadcast_yes_all", BroadcastStates.confirming_all)
 async def broadcast_all_send(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
-    """Отправляет сообщение всем"""
     data = await state.get_data()
     from_chat_id = data.get("from_chat_id")
     message_id = data.get("message_id")
 
     if not from_chat_id or not message_id:
-        await callback.answer("❌ Сообщение потеряно. Попробуй ещё раз.", show_alert=True)
+        await callback.answer("❌ Сообщение потеряно.", show_alert=True)
         await state.clear()
         return
 
@@ -1125,8 +1188,7 @@ async def broadcast_all_send(callback: types.CallbackQuery, state: FSMContext, b
     total = len(user_ids)
 
     await callback.message.edit_text(
-        f"📤 <b>Рассылаю...</b>\n\n"
-        f"👥 Получателей: {total}",
+        f"📤 <b>Рассылаю...</b>\n\n👥 Получателей: {total}",
         parse_mode="HTML"
     )
 
@@ -1163,17 +1225,13 @@ async def broadcast_all_cancel(callback: types.CallbackQuery, state: FSMContext)
     await callback.answer("Отменено")
 
 
-# ============ СТАРОСТА: РАССЫЛКА ПО ГРУППЕ ============
-
 @router.message(Command("group_broadcast"))
 async def cmd_group_broadcast(message: types.Message, state: FSMContext):
-    """Рассылка по своей группе (только для старосты)"""
     user = get_user(message.from_user.id)
     if not user or user[5] != 'starosta':
         await message.answer("⛔ Только староста может делать рассылку по группе.")
         return
 
-    # Считаем получателей
     user_ids = get_group_user_ids(user[1], user[2], user[3])
     total = len(user_ids)
 
@@ -1193,26 +1251,21 @@ async def cmd_group_broadcast(message: types.Message, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_message_group)
 async def broadcast_group_preview(message: types.Message, state: FSMContext):
-    """Сохраняем сообщение и показываем подтверждение"""
     if message.text == "/cancel":
         await state.clear()
         await message.answer("❌ Рассылка отменена.")
         return
-
     user = get_user(message.from_user.id)
     if not user or user[5] != 'starosta':
         await state.clear()
         await message.answer("⛔ Только староста.")
         return
-
     await state.update_data(
         from_chat_id=message.chat.id,
         message_id=message.message_id,
     )
-
     user_ids = get_group_user_ids(user[1], user[2], user[3])
     total = len(user_ids)
-
     await message.answer(
         f"📢 <b>Подтверди рассылку по группе {user[3]}</b>\n\n"
         f"👥 Получателей: <b>{total}</b>\n\n"
@@ -1225,7 +1278,6 @@ async def broadcast_group_preview(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "broadcast_yes_group", BroadcastStates.confirming_group)
 async def broadcast_group_send(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
-    """Отправляет сообщение группе"""
     user = get_user(callback.from_user.id)
     if not user or user[5] != 'starosta':
         await callback.answer("⛔ Нет прав.", show_alert=True)
@@ -1237,7 +1289,7 @@ async def broadcast_group_send(callback: types.CallbackQuery, state: FSMContext,
     message_id = data.get("message_id")
 
     if not from_chat_id or not message_id:
-        await callback.answer("❌ Сообщение потеряно. Попробуй ещё раз.", show_alert=True)
+        await callback.answer("❌ Сообщение потеряно.", show_alert=True)
         await state.clear()
         return
 
@@ -1245,8 +1297,7 @@ async def broadcast_group_send(callback: types.CallbackQuery, state: FSMContext,
     total = len(user_ids)
 
     await callback.message.edit_text(
-        f"📤 <b>Рассылаю по группе {user[3]}...</b>\n\n"
-        f"👥 Получателей: {total}",
+        f"📤 <b>Рассылаю по группе {user[3]}...</b>\n\n👥 Получателей: {total}",
         parse_mode="HTML"
     )
 
@@ -1283,11 +1334,8 @@ async def broadcast_group_cancel(callback: types.CallbackQuery, state: FSMContex
     await callback.answer("Отменено")
 
 
-# ============ ОТМЕНА ============
-
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
-    """Отмена любого действия"""
     current = await state.get_state()
     if current is None:
         return
@@ -1299,7 +1347,6 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 
 @router.message(Command("remove_starosta"))
 async def cmd_remove_starosta(message: types.Message, bot: Bot):
-    """Снимает роль старосты: /remove_starosta <user_id>"""
     if not _is_admin(message.from_user.id):
         await message.answer("⛔ Только админ может снимать старосту.")
         return
@@ -1307,8 +1354,7 @@ async def cmd_remove_starosta(message: types.Message, bot: Bot):
     parts = message.text.split()
     if len(parts) != 2:
         await message.answer(
-            "📝 <b>Формат:</b> <code>/remove_starosta &lt;user_id&gt;</code>\n\n"
-            "<b>Пример:</b> <code>/remove_starosta 123456789</code>",
+            "📝 <b>Формат:</b> <code>/remove_starosta &lt;user_id&gt;</code>",
             parse_mode="HTML"
         )
         return
@@ -1319,10 +1365,6 @@ async def cmd_remove_starosta(message: types.Message, bot: Bot):
         await message.answer("❌ ID должен быть числом.")
         return
 
-    if target_id == message.from_user.id and _is_admin(target_id):
-        # Админ снимает старосту с себя — разрешаем
-        pass
-
     user = get_user(target_id)
     if not user:
         await message.answer(f"❌ Пользователь с ID <code>{target_id}</code> не зарегистрирован.", parse_mode="HTML")
@@ -1330,25 +1372,21 @@ async def cmd_remove_starosta(message: types.Message, bot: Bot):
 
     if user[5] != 'starosta':
         await message.answer(
-            f"⚠️ Пользователь <b>{_escape_html(user[4])}</b> "
-            f"(<code>{target_id}</code>) не является старостой.",
+            f"⚠️ Пользователь <b>{_escape_html(user[4])}</b> не является старостой.",
             parse_mode="HTML"
         )
         return
 
-    # Снимаем роль
     success, full_name, group_name = remove_starosta(target_id)
 
     if not success:
-        await message.answer(f"❌ Не удалось снять роль старосты с <code>{target_id}</code>.", parse_mode="HTML")
+        await message.answer(f"❌ Не удалось снять роль старосты.", parse_mode="HTML")
         return
 
-    # Уведомляем бывшего старосту
     try:
         await bot.send_message(
             target_id,
-            "⚠️ <b>С вас снята роль старосты.</b>\n\n"
-            "Теперь вы обычный студент. Если нужно — обратитесь к администратору.",
+            "⚠️ <b>С вас снята роль старосты.</b>\n\nТеперь вы обычный студент.",
             parse_mode="HTML"
         )
     except Exception as e:
@@ -1363,15 +1401,11 @@ async def cmd_remove_starosta(message: types.Message, bot: Bot):
     )
 
 
-# ============ INLINE: СНЯТИЕ РОЛИ ИЗ /user ============
-
 @router.callback_query(F.data.startswith("user_remove_starosta_yes_"))
 async def user_remove_starosta_yes(callback: types.CallbackQuery, bot: Bot):
-    """Подтверждение снятия старосты через inline"""
     if not _is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет прав.", show_alert=True)
         return
-
     try:
         target_id = int(callback.data.replace("user_remove_starosta_yes_", ""))
     except ValueError:
@@ -1382,7 +1416,6 @@ async def user_remove_starosta_yes(callback: types.CallbackQuery, bot: Bot):
     if not user:
         await callback.answer("❌ Пользователь уже удалён.", show_alert=True)
         return
-
     if user[5] != 'starosta':
         await callback.answer("⚠️ Уже не староста.", show_alert=True)
         return
@@ -1396,8 +1429,7 @@ async def user_remove_starosta_yes(callback: types.CallbackQuery, bot: Bot):
     try:
         await bot.send_message(
             target_id,
-            "⚠️ <b>С вас снята роль старосты.</b>\n\n"
-            "Теперь вы обычный студент. Если нужно — обратитесь к администратору.",
+            "⚠️ <b>С вас снята роль старосты.</b>\n\nТеперь вы обычный студент.",
             parse_mode="HTML"
         )
     except Exception as e:
@@ -1421,11 +1453,9 @@ async def user_remove_starosta_no(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("user_remove_starosta_"))
 async def user_remove_starosta_start(callback: types.CallbackQuery):
-    """Запрос подтверждения"""
     if not _is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет прав.", show_alert=True)
         return
-
     try:
         target_id = int(callback.data.replace("user_remove_starosta_", ""))
     except ValueError:
@@ -1436,7 +1466,6 @@ async def user_remove_starosta_start(callback: types.CallbackQuery):
     if not user:
         await callback.answer("❌ Пользователь не зарегистрирован.", show_alert=True)
         return
-
     if user[5] != 'starosta':
         await callback.answer("⚠️ Пользователь не староста.", show_alert=True)
         return
@@ -1446,47 +1475,47 @@ async def user_remove_starosta_start(callback: types.CallbackQuery):
     await callback.message.edit_text(
         f"{text}\n\n"
         f"⚠️ <b>Снять роль старосты?</b>\n\n"
-        f"<i>Пользователь станет обычным студентом и получит уведомление.</i>",
+        f"<i>Пользователь станет обычным студентом.</i>",
         parse_mode="HTML",
         reply_markup=get_remove_starosta_confirm_kb(target_id)
     )
     await callback.answer()
 
 
-    # ============ АДМИН: ПОЛНОЕ ОБНОВЛЕНИЕ РАСПИСАНИЯ ============
+# ============ АДМИН: ОБНОВЛЕНИЕ РАСПИСАНИЯ (ТОЛЬКО РГРТУ) ============
 
 @router.message(Command("refresh_schedule"))
 async def cmd_refresh_schedule(message: types.Message):
-    """
-    Полное обновление расписания для ВСЕХ групп.
-    Обновляет только те пары, которые изменились — посещаемость сохраняется.
-    
-    Формат: /refresh_schedule
-    """
     if not _is_admin(message.from_user.id):
         await message.answer("⛔ Только админ может запускать полное обновление.")
         return
 
-    await message.answer("🔄 <b>Запускаю полное обновление расписания для всех групп...</b>\n\nЭто может занять 1–3 минуты.", parse_mode="HTML")
+    await message.answer(
+        "🔄 <b>Запускаю полное обновление расписания (только РГРТУ)...</b>\n\n"
+        "Это может занять 1–3 минуты.",
+        parse_mode="HTML"
+    )
 
     groups = get_all_groups()
-    if not groups:
-        await message.answer("📋 В базе нет групп — нечего обновлять.")
+    groups_rgrtu = [g for g in groups if g[0] == "РГРТУ"]
+
+    if not groups_rgrtu:
+        await message.answer("📋 В базе нет групп РГРТУ — нечего обновлять.")
         return
 
     today = datetime.now(MSK)
 
-    total_groups = len(groups)
+    total_groups = len(groups_rgrtu)
     groups_success = 0
     groups_failed = 0
 
-    total_saved = 0      # новых пар
-    total_updated = 0    # обновлённых
-    total_deleted = 0    # удалённых
+    total_saved = 0
+    total_updated = 0
+    total_deleted = 0
 
-    failed_groups = []   # какие группы не удалось обновить
+    failed_groups = []
 
-    for university, faculty, group_name in groups:
+    for university, faculty, group_name in groups_rgrtu:
         try:
             date_iso = today.strftime("%Y-%m-%d")
             data = await fetch_schedule_from_api(group_name, date_iso)
@@ -1505,13 +1534,13 @@ async def cmd_refresh_schedule(message: types.Message):
                 target = today + timedelta(days=offset)
                 day_name = DAYS_RU[target.weekday()]
                 target_iso = target.strftime("%Y-%m-%d")
-                target_week = get_week_type_for_date(target.date())
+                target_week = get_week_type_for_date(target.date(), university)
 
                 pairs = parse_schedule_for_day(data, target_iso, target_week)
                 for p in pairs:
                     existing = get_schedule_pair_by_key(
                         university, faculty, group_name,
-                        day_name, target_week, p["pair_number"]
+                        day_name, target_week, p["pair_number"], subgroup=0
                     )
 
                     upsert_schedule_pair(
@@ -1519,9 +1548,12 @@ async def cmd_refresh_schedule(message: types.Message):
                         day_name, p["pair_number"], p["subject"],
                         p["teacher"], p["room"], p["start_time"], p["end_time"],
                         week_type=target_week,
-                        lesson_type=p.get("lesson_type", "")
+                        lesson_type=p.get("lesson_type", ""),
+                        subgroup=0,
+                        valid_until=None,
+                        lesson_type_full=None,
                     )
-                    valid_keys.add((day_name, target_week, p["pair_number"]))
+                    valid_keys.add((day_name, target_week, p["pair_number"], 0))
 
                     if existing:
                         updated += 1
@@ -1544,9 +1576,8 @@ async def cmd_refresh_schedule(message: types.Message):
             failed_groups.append(group_name)
             print(f"[refresh_schedule]   ❌ Ошибка для {group_name}: {e}")
 
-    # Формируем отчёт
     text = (
-        f"✅ <b>Полное обновление расписания завершено</b>\n\n"
+        f"✅ <b>Обновление расписания РГРТУ завершено</b>\n\n"
         f"📊 <b>Статистика:</b>\n"
         f"👥 Групп обработано: <b>{groups_success}</b> из <b>{total_groups}</b>\n"
         f"📚 Новых пар: <b>{total_saved}</b>\n"
@@ -1556,7 +1587,6 @@ async def cmd_refresh_schedule(message: types.Message):
 
     if groups_failed > 0:
         text += f"\n⚠️ <b>Не удалось обновить:</b> {groups_failed} групп\n"
-        # Показываем первые 10 проблемных групп
         preview = ", ".join(failed_groups[:10])
         if len(failed_groups) > 10:
             preview += f" и ещё {len(failed_groups) - 10}"

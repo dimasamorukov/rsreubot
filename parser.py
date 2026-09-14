@@ -10,7 +10,6 @@ DAYS_RU = {
 
 DAY_EN = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
-# Расшифровка типов занятий
 LESSON_TYPE_NAMES = {
     "Лек.": "Лекция",
     "Лаб.": "Лабораторная",
@@ -22,11 +21,6 @@ LESSON_TYPE_NAMES = {
 
 
 async def fetch_schedule_from_api(group_name: str, date: str = None) -> dict:
-    """
-    Загружает расписание группы через API.
-    group_name — номер группы (например, "5110")
-    date — дата в формате YYYY-MM-DD (по умолчанию — сегодня)
-    """
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
 
@@ -50,9 +44,6 @@ async def fetch_schedule_from_api(group_name: str, date: str = None) -> dict:
 
 
 def parse_schedule_for_day(data: dict, target_date: str, week_type: str) -> list:
-    """
-    Извлекает расписание на конкретный день из ответа API.
-    """
     if not data or "schedule" not in data:
         return []
 
@@ -158,7 +149,6 @@ def format_schedule_for_message(pairs: list, day_name: str, week_type: str, date
     for p in pairs:
         text += f"**{p['pair_number']} пара** ({p['start_time']}–{p['end_time']})\n"
 
-        # Расшифровка типа занятия: "Лек." → "Лекция"
         lesson_type = p.get('lesson_type') or ""
         lesson_type_full = LESSON_TYPE_NAMES.get(lesson_type, lesson_type)
 
@@ -171,6 +161,85 @@ def format_schedule_for_message(pairs: list, day_name: str, week_type: str, date
             text += f"👤 {p['teacher']}\n"
         if p['room']:
             text += f"🚪 {p['room']}\n"
+
+        text += "➖➖➖➖➖\n"
+
+    return text
+
+
+def format_schedule_grouped(pairs: list, day_name: str, week_type: str,
+                            date_str: str = "", user_subgroup: int = None) -> str:
+    """
+    Форматирует расписание с учётом подгрупп.
+    user_subgroup: 0/None — показать все подгруппы с пометками;
+                   1 или 2 — скрыть чужие подгруппы.
+    """
+    from collections import OrderedDict
+
+    if not pairs:
+        return f"📅 На {day_name} ({week_type}) пар нет 🎉"
+
+    week_icon = "🔵" if week_type == "числитель" else "🟢"
+    text = f"📅 **Расписание на {day_name}"
+    if date_str:
+        text += f", {date_str}"
+    text += "**\n"
+    text += f"{week_icon} Неделя: **{week_type}**\n\n"
+
+    # Группируем по номеру пары
+    by_number = OrderedDict()
+    for p in pairs:
+        num = p.get("pair_number", 0)
+        by_number.setdefault(num, []).append(p)
+
+    for num, group in by_number.items():
+        first = group[0]
+        time_str = first.get('start_time') or ''
+        end_str = first.get('end_time') or ''
+        header = f"**{num} пара** ({time_str}"
+        if end_str:
+            header += f"–{end_str}"
+        header += ")\n"
+        text += header
+
+        # Сортировка: 0 (для всех), 1, 2
+        group.sort(key=lambda x: (x.get('subgroup', 0) or 0))
+
+        printed_any = False
+        for p in group:
+            sg = p.get('subgroup', 0) or 0
+
+            # Фильтр по подгруппе студента
+            if user_subgroup and sg != 0 and sg != user_subgroup:
+                continue
+
+            printed_any = True
+            prefix = "┣ "
+            if sg == 1:
+                prefix = "┣ **[1 пг]** "
+            elif sg == 2:
+                prefix = "┣ **[2 пг]** "
+
+            lesson_full = p.get('lesson_type_full') or LESSON_TYPE_NAMES.get(
+                p.get('lesson_type') or '', p.get('lesson_type') or ''
+            )
+
+            text += prefix
+            if lesson_full:
+                text += f"📌 {lesson_full}\n"
+            else:
+                text += "\n"
+
+            text += f"┃ 📖 {p.get('subject', '')}\n"
+            if p.get('teacher'):
+                text += f"┃ 👤 {p['teacher']}\n"
+            if p.get('room'):
+                text += f"┃ 🚪 {p['room']}\n"
+
+        if not printed_any:
+            # Все пары отфильтрованы — пропускаем блок
+            # Убираем заголовок, который уже добавили
+            text = text[:-(len(header))]
 
         text += "➖➖➖➖➖\n"
 
