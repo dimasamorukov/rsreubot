@@ -26,13 +26,6 @@ from keyboards import (
 
 from parser import fetch_schedule_from_api, parse_schedule_for_day, LESSON_TYPE_NAMES
 
-try:
-    from sync import sync_tables
-    SYNC_AVAILABLE = True
-except ImportError:
-    SYNC_AVAILABLE = False
-    print("[scheduler] sync.py не найден — синхронизация с PostgreSQL отключена")
-
 scheduler = AsyncIOScheduler()
 
 DAYS_RU = {
@@ -306,7 +299,6 @@ async def send_tomorrow_attendance_requests(bot: Bot):
 
 async def _send_attendance_broadcast(bot, pairs, users, university, group_name,
                                      day_name, date_str, subgroup=None):
-    """Формирует и отправляет сообщение для одной группы пользователей."""
     text = (
         f"📋 <b>Отметь явку на завтра</b>\n\n"
         f"📅 <b>{day_name}, {date_str}</b>\n"
@@ -327,7 +319,6 @@ async def _send_attendance_broadcast(bot, pairs, users, university, group_name,
 
         text += f"<b>{p['pair_number']} пара</b>{sg_label} | {p['subject']}\n"
 
-        # Тип занятия
         if p["lesson_type_full"]:
             text += f"📌 {p['lesson_type_full']}\n"
 
@@ -357,7 +348,6 @@ async def _send_attendance_broadcast(bot, pairs, users, university, group_name,
 # ============ ВРЕМЕННЫЙ ПУШ ДЛЯ ТЕСТА ============
 
 async def manual_test_broadcast(bot: Bot):
-    """Ручной запуск рассылки 'Отметь явку на завтра'."""
     print("[scheduler] 🧪 РУЧНОЙ ЗАПУСК рассылки")
     await send_tomorrow_attendance_requests(bot)
 
@@ -366,25 +356,14 @@ async def manual_test_broadcast(bot: Bot):
 
 def start_scheduler(bot: Bot):
     scheduler.add_job(check_upcoming_pairs, "interval", minutes=1, args=[bot], id="check_pairs", replace_existing=True)
-
     scheduler.add_job(auto_update_all_schedules, "interval", hours=1, args=[bot], id="auto_update_schedules", replace_existing=True)
-
     scheduler.add_job(auto_update_all_schedules, "date", run_date=datetime.now(MSK) + timedelta(seconds=10), args=[bot], id="auto_update_initial", replace_existing=True)
-
     scheduler.add_job(cleanup_expired_homework, "interval", hours=24, args=[bot], id="cleanup_homework", replace_existing=True)
-
     scheduler.add_job(cleanup_expired_homework, "date", run_date=datetime.now(MSK) + timedelta(seconds=30), args=[bot], id="cleanup_homework_initial", replace_existing=True)
-
     scheduler.add_job(cleanup_expired_schedule, "cron", hour=3, minute=0, timezone=MSK, args=[bot], id="cleanup_schedule", replace_existing=True)
-
     scheduler.add_job(send_tomorrow_attendance_requests, "cron", hour=14, minute=0, timezone=MSK, args=[bot], id="tomorrow_attendance", replace_existing=True)
-
     scheduler.add_job(auto_update_all_schedules, "cron", hour=0, minute=0, timezone=MSK, args=[bot], id="auto_update_midnight", replace_existing=True)
 
-    if SYNC_AVAILABLE:
-        scheduler.add_job(sync_tables, "interval", hours=1, id="sync_db", replace_existing=True)
-        print("⏰ Планировщик: напоминания + автообновление РГРТУ + очистка ДЗ + очистка пар + рассылка на завтра + синхронизация")
-    else:
-        print("⏰ Планировщик: напоминания + автообновление РГРТУ + очистка ДЗ + очистка пар + рассылка на завтра")
+    print("⏰ Планировщик: напоминания + автообновление РГРТУ + очистка ДЗ + очистка пар + рассылка на завтра")
 
     scheduler.start()

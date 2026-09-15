@@ -20,6 +20,4 @@ typing_extensions==4.16.0
 tzdata==2026.3
 tzlocal==5.4.4
 yarl==1.24.5
-pandas
-sqlalchemy
-psycopg2-binary
+mysql-connector-python==9.1.0
