@@ -16,6 +16,14 @@ class Registration(StatesGroup):
     waiting_name = State()
 
 
+WELCOME_TEXT = (
+    "📌 Это учебный бот 📌\n\n"
+    "Подробнее о функционале — /help\n"
+    "При обновлении бота — /start\n"
+    "Если ты староста, пиши в поддержку — @hiloetc"
+)
+
+
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -41,6 +49,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
         return
 
     await state.clear()
+
+    # Приветствие до регистрации
+    await message.answer(WELCOME_TEXT)
+
     await message.answer(
         "Добро пожаловать! Давай зарегистрируемся.\n\n"
         "В каком вы ВУЗе?",
@@ -131,4 +143,8 @@ async def process_name(message: types.Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=get_main_menu(False, university=data['university'])
     )
+
+    # Приветствие после регистрации
+    await message.answer(WELCOME_TEXT)
+
     await state.clear()

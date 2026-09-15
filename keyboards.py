@@ -79,6 +79,7 @@ def get_main_menu(is_admin=False, university=None):
         buttons.append([KeyboardButton(text="🔄 Обновить расписание")])
 
     buttons.append([KeyboardButton(text="📝 Задолженности"), KeyboardButton(text="ℹ️ Помощь")])
+    buttons.append([KeyboardButton(text="ℹ️ Инфо")])
 
     if is_admin:
         buttons.append([KeyboardButton(text="👑 Панель старосты"), KeyboardButton(text="📊 Посещаемость")])
@@ -118,37 +119,63 @@ def get_homework_confirm_delete_kb(homework_id):
     )
 
 
-def get_profile_edit_kb(notify_pairs: bool = True, notify_attendance: bool = True):
+def get_profile_edit_kb(notify_pairs: bool = True,
+                        notify_attendance: bool = True,
+                        university: str = None,
+                        subgroup: int = 0):
     pairs_text = "🔔 Пары: ВКЛ" if notify_pairs else "🔕 Пары: ВЫКЛ"
     attendance_text = "📋 Явка: ВКЛ" if notify_attendance else "📋 Явка: ВЫКЛ"
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✏️ ВУЗ", callback_data="edit_university"),
-                InlineKeyboardButton(text="✏️ Факультет", callback_data="edit_faculty"),
-            ],
-            [
-                InlineKeyboardButton(text="✏️ Группа", callback_data="edit_group_name"),
-                InlineKeyboardButton(text="✏️ ФИО", callback_data="edit_full_name"),
-            ],
-            [InlineKeyboardButton(text=pairs_text, callback_data="toggle_notify_pairs")],
-            [InlineKeyboardButton(text=attendance_text, callback_data="toggle_notify_attendance")],
-            [InlineKeyboardButton(text="🔙 Закрыть", callback_data="edit_close")],
-        ]
-    )
-
-
-def get_admin_panel_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ ДЗ"), KeyboardButton(text="➕ Пара")],
-            [KeyboardButton(text="👥 Список группы"), KeyboardButton(text="📊 Посещаемость")],
-            [KeyboardButton(text="📜 Логи посещаемости")],
-            [KeyboardButton(text="🔙 Назад")],
+    rows = [
+        [
+            InlineKeyboardButton(text="✏️ ВУЗ", callback_data="edit_university"),
+            InlineKeyboardButton(text="✏️ Факультет", callback_data="edit_faculty"),
         ],
-        resize_keyboard=True
-    )
+        [
+            InlineKeyboardButton(text="✏️ Группа", callback_data="edit_group_name"),
+            InlineKeyboardButton(text="✏️ ФИО", callback_data="edit_full_name"),
+        ],
+    ]
+
+    # Подгруппа — только для РГУ
+    if university == "РГУ":
+        sg_label = "не выбрана"
+        if subgroup == 1:
+            sg_label = "1"
+        elif subgroup == 2:
+            sg_label = "2"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"👥 Подгруппа: {sg_label}",
+                callback_data="edit_subgroup"
+            )
+        ])
+
+    rows.append([InlineKeyboardButton(text=pairs_text, callback_data="toggle_notify_pairs")])
+    rows.append([InlineKeyboardButton(text=attendance_text, callback_data="toggle_notify_attendance")])
+    rows.append([InlineKeyboardButton(text="🔙 Закрыть", callback_data="edit_close")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_admin_panel_kb(university=None):
+    """
+    Панель старосты.
+    university — если "РГУ", добавляем кнопку «🗑 Удалить пару».
+    """
+    buttons = [
+        [KeyboardButton(text="➕ ДЗ"), KeyboardButton(text="➕ Пара")],
+        [KeyboardButton(text="👥 Список группы"), KeyboardButton(text="📊 Посещаемость")],
+        [KeyboardButton(text="📜 Логи посещаемости")],
+    ]
+
+    # Удаление пары — ТОЛЬКО для РГУ
+    if university == "РГУ":
+        buttons.append([KeyboardButton(text="🗑 Удалить пару")])
+
+    buttons.append([KeyboardButton(text="🔙 Назад")])
+
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
 def get_days_kb(prefix="day"):
@@ -406,5 +433,87 @@ def get_period_end_kb():
             [InlineKeyboardButton(text="До конца семестра (31.12)", callback_data="pe_semester")],
             [InlineKeyboardButton(text="До конца месяца", callback_data="pe_month")],
             [InlineKeyboardButton(text="Ввести дату вручную", callback_data="pe_manual")],
+        ]
+    )
+
+
+# ============ УДАЛЕНИЕ ПАРЫ (РГУ) ============
+
+def get_days_delete_kb():
+    """Выбор дня недели для удаления пары."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Пн", callback_data="dpd_Понедельник"),
+                InlineKeyboardButton(text="Вт", callback_data="dpd_Вторник"),
+                InlineKeyboardButton(text="Ср", callback_data="dpd_Среда"),
+            ],
+            [
+                InlineKeyboardButton(text="Чт", callback_data="dpd_Четверг"),
+                InlineKeyboardButton(text="Пт", callback_data="dpd_Пятница"),
+                InlineKeyboardButton(text="Сб", callback_data="dpd_Суббота"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Отмена", callback_data="dpd_cancel"),
+            ],
+        ]
+    )
+
+
+def get_pairs_delete_kb(pairs):
+    """
+    pairs — список кортежей вида
+    (schedule_id, pair_number, subject, week_type, subgroup, start_time, teacher, room)
+    """
+    rows = []
+
+    for p in pairs:
+        schedule_id, pair_number, subject, week_type, subgroup, start_time, teacher, room = p[:8]
+
+        # Пометки
+        wt_label = "🔵" if week_type == "числитель" else "🟢"
+        sg_label = ""
+        if subgroup == 1:
+            sg_label = " [1 пг]"
+        elif subgroup == 2:
+            sg_label = " [2 пг]"
+
+        # Урезаем длинный предмет
+        short_subj = subject if len(subject) <= 25 else subject[:22] + "..."
+
+        btn_text = f"{pair_number} пара{_sg_icon(subgroup)} · {short_subj}"
+
+        rows.append([
+            InlineKeyboardButton(
+                text=btn_text,
+                callback_data=f"dpair_{schedule_id}"
+            )
+        ])
+
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dpd_back")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _sg_icon(subgroup):
+    if subgroup == 1:
+        return " [1пг]"
+    if subgroup == 2:
+        return " [2пг]"
+    return ""
+
+# ============ ПОДГРУППА В ПРОФИЛЕ (РГУ) ============
+
+def get_subgroup_choice_kb(current_subgroup: int = 0):
+    """Клавиатура выбора подгруппы в профиле."""
+    def mark(val):
+        return "✅ " if current_subgroup == val else ""
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{mark(1)}1 подгруппа", callback_data="set_subgroup_1")],
+            [InlineKeyboardButton(text=f"{mark(2)}2 подгруппа", callback_data="set_subgroup_2")],
+            [InlineKeyboardButton(text=f"{mark(0)}Нет подгруппы (для всех)", callback_data="set_subgroup_0")],
+            [InlineKeyboardButton(text="🔙 Закрыть", callback_data="subgroup_close")],
         ]
     )

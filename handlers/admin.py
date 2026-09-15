@@ -19,6 +19,9 @@ from database import (
     delete_orphan_schedule_pairs,
     is_user_banned, ban_user, unban_user, get_banned_users,
     remove_starosta,
+    get_pairs_for_delete,
+    delete_schedule_pair_by_id,
+    get_schedule_pair_info,
 )
 from keyboards import (
     get_admin_panel_kb, get_main_menu,
@@ -27,6 +30,8 @@ from keyboards import (
     get_broadcast_confirm_kb, get_remove_starosta_confirm_kb,
     get_week_type_kb, get_days_kb_full,
     get_lesson_type_kb, get_subgroup_kb, get_period_end_kb,
+    get_days_delete_kb,
+    get_pairs_delete_kb,
 )
 from config import (
     ADMIN_IDS, get_current_week_type, get_week_type_for_date
@@ -352,7 +357,7 @@ async def pair_confirm_yes(callback, state):
         f"📆 До: {data.get('valid_until') or '—'}",
         parse_mode="Markdown"
     )
-    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb())
+    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb(university=user[1]))
     await state.clear()
     await callback.answer("Сохранено")
 
@@ -360,7 +365,7 @@ async def pair_confirm_yes(callback, state):
 @router.callback_query(F.data == "pairconfirm_no", AddPair.confirming)
 async def pair_confirm_no(callback, state):
     await callback.message.edit_text("❌ Отменено.")
-    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb())
+    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb(university=user[1]))
     await state.clear()
     await callback.answer("Отменено")
 
@@ -373,7 +378,7 @@ async def admin_panel(message):
     if not user or user[5] != 'starosta':
         await message.answer("⛔ У тебя нет прав старосты.")
         return
-    await message.answer("👑 Панель старосты", reply_markup=get_admin_panel_kb())
+    await message.answer("👑 Панель старосты", reply_markup=get_admin_panel_kb(university=user[1]))
 
 
 @router.message(F.text == "🔙 Назад")
@@ -490,7 +495,7 @@ async def hw_confirm_yes(callback, state):
         f"✅ **ДЗ добавлено!**\n\n📖 {data['subject']}\n📝 {data['task']}\n⏰ Срок: **{deadline_text}**",
         parse_mode="Markdown"
     )
-    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb())
+    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb(university=user[1]))
     await state.clear()
     await callback.answer("Сохранено")
 
@@ -498,7 +503,7 @@ async def hw_confirm_yes(callback, state):
 @router.callback_query(F.data == "hwconfirm_no", AddHomework.confirming)
 async def hw_confirm_no(callback, state):
     await callback.message.edit_text("❌ Отменено.")
-    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb())
+    await callback.message.answer("Панель старосты:", reply_markup=get_admin_panel_kb(university=user[1]))
     await state.clear()
     await callback.answer("Отменено")
 
@@ -1593,3 +1598,211 @@ async def cmd_refresh_schedule(message: types.Message):
         text += f"<i>{preview}</i>"
 
     await message.answer(text, parse_mode="HTML")
+
+# ============ УДАЛЕНИЕ ПАРЫ (ТОЛЬКО РГУ) ============
+
+@router.message(F.text == "🗑 Удалить пару")
+async def delete_pair_start(message, state):
+    user = get_user(message.from_user.id)
+    if not user or user[5] != 'starosta':
+        await message.answer("⛔ Только староста может удалять пары.")
+        return
+
+    if user[1] != "РГУ":
+        await message.answer(
+            "ℹ️ Удаление пар доступно только для <b>РГУ</b>.\n"
+            "Расписание РГРТУ обновляется автоматически с сайта.",
+            parse_mode="HTML"
+        )
+        return
+
+    await state.clear()
+    await message.answer(
+        "🗑 <b>Удаление пары</b>\n\n"
+        "Выбери <b>день недели</b>:",
+        parse_mode="HTML",
+        reply_markup=get_days_delete_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("dpd_"))
+async def delete_pair_choose_day(callback: types.CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user or user[5] != 'starosta':
+        await callback.answer("⛔ Нет прав.", show_alert=True)
+        return
+
+    if user[1] != "РГУ":
+        await callback.answer("⛔ Только РГУ.", show_alert=True)
+        return
+
+    action = callback.data.replace("dpd_", "")
+
+    if action == "cancel":
+        await callback.message.edit_text("❌ Удаление отменено.")
+        await callback.message.answer(
+            "Панель старосты:",
+            reply_markup=get_admin_panel_kb(university=user[1])
+        )
+        await callback.answer()
+        return
+
+    if action == "back":
+        await callback.message.edit_text(
+            "🗑 <b>Удаление пары</b>\n\n"
+            "Выбери <b>день недели</b>:",
+            parse_mode="HTML",
+            reply_markup=get_days_delete_kb()
+        )
+        await callback.answer()
+        return
+
+    day = action
+    pairs = get_pairs_for_delete(user[1], user[2], user[3], day)
+
+    if not pairs:
+        await callback.message.edit_text(
+            f"📅 На <b>{day}</b> пар нет.",
+            parse_mode="HTML",
+            reply_markup=get_days_delete_kb()
+        )
+        await callback.answer()
+        return
+
+    await callback.message.edit_text(
+        f"🗑 <b>Выбери пару для удаления</b>\n"
+        f"📅 День: <b>{day}</b>\n\n"
+        f"⚠️ Удаление затронет <b>только</b> эту пару.",
+        parse_mode="HTML",
+        reply_markup=get_pairs_delete_kb(pairs)
+    )
+    await callback.answer()
+
+
+# ⚠️ ВАЖНО: yes/no идут ПЕРВЫМИ, общий — ПОСЛЕ!
+
+@router.callback_query(F.data.startswith("dpair_yes_"))
+async def delete_pair_yes(callback: types.CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user or user[5] != 'starosta':
+        await callback.answer("⛔ Нет прав.", show_alert=True)
+        return
+
+    if user[1] != "РГУ":
+        await callback.answer("⛔ Только РГУ.", show_alert=True)
+        return
+
+    try:
+        schedule_id = int(callback.data.replace("dpair_yes_", ""))
+    except ValueError:
+        await callback.answer("Ошибка", show_alert=True)
+        return
+
+    info = get_schedule_pair_info(schedule_id)
+    if not info:
+        await callback.answer("❌ Пара уже удалена.", show_alert=True)
+        return
+
+    if (info[0], info[1], info[2]) != (user[1], user[2], user[3]):
+        await callback.answer("⛔ Эта пара не из вашей группы.", show_alert=True)
+        return
+
+    ok = delete_schedule_pair_by_id(schedule_id)
+    if not ok:
+        await callback.answer("❌ Не удалось удалить.", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"✅ Пара удалена:\n\n"
+        f"📖 <b>{info[5]}</b>\n"
+        f"📅 {info[3]}, {info[4]} пара",
+        parse_mode="HTML"
+    )
+    await callback.message.answer(
+        "Панель старосты:",
+        reply_markup=get_admin_panel_kb(university=user[1])
+    )
+    await callback.answer("Удалено")
+
+
+@router.callback_query(F.data.startswith("dpair_no_"))
+async def delete_pair_no(callback: types.CallbackQuery):
+    try:
+        await callback.message.edit_text("❌ Удаление отменено.")
+    except Exception as e:
+        print(f"[admin] edit_text error: {e}")
+    await callback.answer("Отменено")
+
+
+# ⚠️ ОБЩИЙ — В САМОМ КОНЦЕ, чтобы не перехватывать yes/no
+@router.callback_query(F.data.startswith("dpair_"))
+async def delete_pair_confirm(callback: types.CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user or user[5] != 'starosta':
+        await callback.answer("⛔ Нет прав.", show_alert=True)
+        return
+
+    if user[1] != "РГУ":
+        await callback.answer("⛔ Только РГУ.", show_alert=True)
+        return
+
+    try:
+        schedule_id = int(callback.data.replace("dpair_", ""))
+    except ValueError:
+        await callback.answer("Ошибка", show_alert=True)
+        return
+
+    info = get_schedule_pair_info(schedule_id)
+    if not info:
+        await callback.answer("❌ Пара уже удалена.", show_alert=True)
+        return
+
+    (s_uni, s_fac, s_grp, s_day, s_num,
+     s_subject, s_wt, s_sg, s_start, s_teacher, s_room) = info
+
+    if (s_uni, s_fac, s_grp) != (user[1], user[2], user[3]):
+        await callback.answer("⛔ Эта пара не из вашей группы.", show_alert=True)
+        return
+
+    wt_label = "числитель" if s_wt == "числитель" else "знаменатель"
+    sg_label = ""
+    if s_sg == 1:
+        sg_label = " [1 пг]"
+    elif s_sg == 2:
+        sg_label = " [2 пг]"
+
+    text = (
+        f"⚠️ <b>Удалить пару?</b>\n\n"
+        f"📅 День: <b>{s_day}</b>\n"
+        f"🔢 Номер: <b>{s_num}</b>\n"
+        f"⏰ Начало: <b>{s_start}</b>\n"
+        f"📆 Неделя: <b>{wt_label}</b>{sg_label}\n"
+        f"📖 <b>{s_subject}</b>\n"
+    )
+    if s_teacher:
+        text += f"👤 {s_teacher}\n"
+    if s_room:
+        text += f"🚪 {s_room}\n"
+
+    text += "\n<i>Действие нельзя отменить.</i>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Удалить", callback_data=f"dpair_yes_{schedule_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"dpair_no_{schedule_id}"),
+        ],
+    ])
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@router.message(Command("test_broadcast"))
+async def cmd_test_broadcast(message: types.Message, bot: Bot):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+    await message.answer("🧪 Запускаю ручную рассылку «Отметь явку»...")
+    from scheduler import manual_test_broadcast
+    await manual_test_broadcast(bot)
+    await message.answer("✅ Готово.")

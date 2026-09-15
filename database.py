@@ -671,21 +671,23 @@ def delete_debt(debt_id):
 
 def set_attendance(user_id, schedule_id, status, date):
     """
-    Записывает отметку ТОЛЬКО если пара принадлежит группе пользователя.
+    Записывает отметку ТОЛЬКО если пара принадлежит группе пользователя
+    И подгруппе (общие пары subgroup=0 тоже разрешены).
     Возвращает True если записано, False если пара чужая.
     """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Проверяем владельца пары
+    # Пара из расписания
     cursor.execute("""
-        SELECT university, faculty, group_name
+        SELECT university, faculty, group_name, subgroup
         FROM schedule WHERE id = ?
     """, (schedule_id,))
     sched = cursor.fetchone()
 
+    # Пользователь
     cursor.execute("""
-        SELECT university, faculty, group_name
+        SELECT university, faculty, group_name, subgroup
         FROM users WHERE user_id = ?
     """, (user_id,))
     usr = cursor.fetchone()
@@ -694,7 +696,16 @@ def set_attendance(user_id, schedule_id, status, date):
         conn.close()
         return False
 
-    if sched != usr:
+    s_uni, s_fac, s_grp, s_sub = sched
+    u_uni, u_fac, u_grp, u_sub = usr
+
+    # Проверка группы
+    if (s_uni, s_fac, s_grp) != (u_uni, u_fac, u_grp):
+        conn.close()
+        return False
+
+    # Проверка подгруппы: пара для всех (0) ИЛИ совпадает с подгруппой пользователя
+    if s_sub not in (0, u_sub or 0):
         conn.close()
         return False
 
@@ -931,7 +942,9 @@ def get_pairs_for_user_on_date(user_id, date_offset):
     user = get_user(user_id)
     if not user:
         return []
+
     university, faculty, group_name = user[1], user[2], user[3]
+    subgroup = user[11] if len(user) > 11 else 0
 
     target = datetime.now(MSK) + timedelta(days=date_offset)
     day_name = ["Понедельник", "Вторник", "Среда", "Четверг",
@@ -939,5 +952,93 @@ def get_pairs_for_user_on_date(user_id, date_offset):
     week_type = get_week_type_for_date(target.date(), university)
     target_iso = target.strftime("%Y-%m-%d")
 
+    # ⚠️ Ключевое: передаём subgroup, чтобы чужие подгруппы не попадали
     return get_schedule(university, faculty, group_name, day_name, week_type,
-                        check_date=target_iso)
+                        subgroup=subgroup, check_date=target_iso)
+
+
+def get_pairs_for_delete(university, faculty, group_name, day_of_week):
+    """
+    Возвращает все пары группы на указанный день недели
+    (и числитель, и знаменатель).
+    Формат: (id, pair_number, subject, week_type, subgroup, start_time, teacher, room)
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, pair_number, subject, week_type, subgroup,
+               start_time, teacher, room
+        FROM schedule
+        WHERE university = ? AND faculty = ? AND group_name = ?
+          AND day_of_week = ?
+        ORDER BY pair_number, week_type, subgroup
+    """, (university, faculty, group_name, day_of_week))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def delete_schedule_pair_by_id(schedule_id):
+    """Удаляет пару по id. Возвращает True если удалено."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM schedule WHERE id = ?", (schedule_id,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted > 0
+
+
+def get_schedule_pair_info(schedule_id):
+    """
+    Возвращает (university, faculty, group_name, day_of_week, pair_number,
+                 subject, week_type, subgroup, start_time, teacher, room)
+    или None.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT university, faculty, group_name, day_of_week, pair_number,
+               subject, week_type, subgroup, start_time, teacher, room
+        FROM schedule WHERE id = ?
+    """, (schedule_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+# ============ ПОДГРУППЫ (РГУ) ============
+
+def get_users_for_attendance_broadcast_with_subgroup(university, faculty, group_name):
+    """
+    Возвращает [(user_id, full_name, subgroup), ...] для рассылки,
+    учитывая настройку notify_attendance.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT user_id, full_name, subgroup
+        FROM users
+        WHERE university = ? AND faculty = ? AND group_name = ?
+          AND (notify_attendance IS NULL OR notify_attendance = 1)
+    """, (university, faculty, group_name))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_users_for_pair_notifications_with_subgroup(university, faculty, group_name):
+    """
+    Возвращает [(user_id, full_name, subgroup), ...] для напоминаний о парах,
+    учитывая настройку notify_pairs.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT user_id, full_name, subgroup
+        FROM users
+        WHERE university = ? AND faculty = ? AND group_name = ?
+          AND (notify_pairs IS NULL OR notify_pairs = 1)
+    """, (university, faculty, group_name))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows

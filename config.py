@@ -13,6 +13,7 @@ FACULTY_IDS = {
     "ИЭФ": "5",
 }
 
+
 def get_faculty_id(faculty_name: str) -> str:
     return FACULTY_IDS.get(faculty_name)
 
@@ -32,6 +33,7 @@ GROUP_IDS = {
     "418": "2251", "419": "2252", "3011": "2253", "4110": "2254",
 }
 
+
 def get_group_id(group_name: str) -> str:
     return GROUP_IDS.get(group_name)
 
@@ -50,16 +52,14 @@ if not BOT_TOKEN:
 
 UNIVERSITIES = ["РГРТУ", "РГУ"]
 
-# Факультеты РГРТУ
 FACULTIES_RGRTU = ["ФРТ", "ФВТ", "ФАИТУ", "ИЭФ", "ФЭ"]
 
-# Факультеты РГУ
 FACULTIES_RGU = [
     "ФЭСУ", "ИФМиКН", "ИЕН", "ИИЯ",
     "ФФКС", "ИИФПН", "ФРФНК", "ИППСР", "ЮИ",
 ]
 
-# ============ СЕМЕСТР (для обоих вузов одинаковые) ============
+# ============ СЕМЕСТР ============
 
 SEMESTER_START = "2026-09-07"
 FIRST_WEEK_TYPE = "знаменатель"

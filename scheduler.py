@@ -10,6 +10,8 @@ from database import (
     get_all_groups, get_schedule,
     get_users_for_pair_notifications,
     get_users_for_attendance_broadcast,
+    get_users_for_pair_notifications_with_subgroup,
+    get_users_for_attendance_broadcast_with_subgroup,
     get_homework, get_homework_status,
     get_schedule_pair_by_key, upsert_schedule_pair, delete_orphan_schedule_pairs,
     delete_expired_homework,
@@ -72,7 +74,6 @@ def _unpack_pair(pair):
 
 async def check_upcoming_pairs(bot: Bot):
     now = datetime.now(MSK)
-    target_time = (now + timedelta(minutes=30)).strftime("%H:%M")
     today = DAYS_RU[now.weekday()]
     today_iso = now.strftime("%Y-%m-%d")
 
@@ -82,49 +83,70 @@ async def check_upcoming_pairs(bot: Bot):
 
     for university, faculty, group_name in groups:
         week_type = get_current_week_type(university)
-        pairs = get_schedule(university, faculty, group_name, today, week_type,
-                             check_date=today_iso)
 
-        for pair in pairs:
-            p = _unpack_pair(pair)
-            start_short = extract_start_time(p["start_time"])
-            if start_short != target_time:
-                continue
+        if university == "РГУ":
+            users = get_users_for_pair_notifications_with_subgroup(university, faculty, group_name)
+            by_sg = {}
+            for user_id, full_name, sg in users:
+                by_sg.setdefault(sg or 0, []).append((user_id, full_name))
 
+            for sg, sg_users in by_sg.items():
+                pairs = get_schedule(university, faculty, group_name, today, week_type,
+                                     subgroup=sg, check_date=today_iso)
+                await _send_pair_notifications(bot, pairs, sg_users,
+                                               university, faculty, group_name)
+        else:
+            pairs = get_schedule(university, faculty, group_name, today, week_type,
+                                 check_date=today_iso)
             users = get_users_for_pair_notifications(university, faculty, group_name)
+            await _send_pair_notifications(bot, pairs, users,
+                                           university, faculty, group_name)
 
+
+async def _send_pair_notifications(bot, pairs, users, university, faculty, group_name):
+    now = datetime.now(MSK)
+    target_time = (now + timedelta(minutes=30)).strftime("%H:%M")
+
+    for pair in pairs:
+        p = _unpack_pair(pair)
+        start_short = extract_start_time(p["start_time"])
+        if start_short != target_time:
+            continue
+
+        for user_id, full_name in users:
+            try:
+                text = (
+                    f"🔔 <b>Через 30 минут пара!</b>\n\n"
+                    f"📖 {p['subject']}\n"
+                    f"🚪 Аудитория: {p['room'] or '—'}\n"
+                    f"⏰ Начало: {start_short}"
+                )
+                if p["lesson_type_full"]:
+                    text += f"\n📌 {p['lesson_type_full']}"
+                if p["teacher"]:
+                    text += f"\n👤 {p['teacher']}"
+                if p["subgroup"] in (1, 2):
+                    text += f"\n👥 {p['subgroup']} подгруппа"
+                await bot.send_message(user_id, text, parse_mode="HTML")
+            except Exception as e:
+                print(f"[scheduler] Не удалось отправить {user_id}: {e}")
+
+        homework_list = get_homework(university, faculty, group_name)
+        for hw_id, hw_subject, task, deadline, hw_file in homework_list:
+            if hw_subject != p["subject"]:
+                continue
             for user_id, full_name in users:
-                try:
-                    text = (
-                        f"🔔 <b>Через 30 минут пара!</b>\n\n"
-                        f"📖 {p['subject']}\n"
-                        f"🚪 Аудитория: {p['room']}\n"
-                        f"⏰ Начало: {start_short}"
-                    )
-                    if p["teacher"]:
-                        text += f"\n👤 {p['teacher']}"
-                    if p["subgroup"] in (1, 2):
-                        text += f"\n👥 {p['subgroup']} подгруппа"
-                    await bot.send_message(user_id, text, parse_mode="HTML")
-                except Exception as e:
-                    print(f"[scheduler] Не удалось отправить {user_id}: {e}")
-
-            homework_list = get_homework(university, faculty, group_name)
-            for hw_id, hw_subject, task, deadline, hw_file in homework_list:
-                if hw_subject != p["subject"]:
+                status = get_homework_status(hw_id, user_id)
+                if status == "done":
                     continue
-                for user_id, full_name in users:
-                    status = get_homework_status(hw_id, user_id)
-                    if status == "done":
-                        continue
-                    try:
-                        await bot.send_message(
-                            user_id,
-                            f"⚠️ Не забудь про ДЗ по <b>{p['subject']}</b>:\n{task}",
-                            parse_mode="HTML"
-                        )
-                    except Exception as e:
-                        print(f"[scheduler] Ошибка ДЗ для {user_id}: {e}")
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"⚠️ Не забудь про ДЗ по <b>{p['subject']}</b>:\n{task}",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    print(f"[scheduler] Ошибка ДЗ для {user_id}: {e}")
 
 
 # ============ АВТООБНОВЛЕНИЕ РАСПИСАНИЯ (ТОЛЬКО РГРТУ) ============
@@ -223,66 +245,121 @@ async def send_tomorrow_attendance_requests(bot: Bot):
     now = datetime.now(MSK)
     print(f"[scheduler] 📋 Рассылка 'Отметь явку на завтра': {now.strftime('%d.%m.%Y %H:%M')} МСК")
 
-    data = get_schedule_for_tomorrow_all_groups()
+    tomorrow = now + timedelta(days=1)
+    day_name = DAYS_RU[tomorrow.weekday()]
+    tomorrow_iso = tomorrow.strftime("%Y-%m-%d")
+    date_str = tomorrow.strftime("%d.%m.%Y")
 
-    if not data:
-        print("[scheduler] 📋 Нет групп с парами на завтра")
+    groups = get_all_groups()
+    if not groups:
+        print("[scheduler] 📋 Нет групп — рассылка пропущена")
         return
 
     total_sent = 0
     total_failed = 0
     groups_skipped = 0
 
-    for university, faculty, group_name, day_name, pairs in data:
+    for university, faculty, group_name in groups:
         starosta = get_starosta(university, faculty, group_name)
         if not starosta:
             print(f"[scheduler] 📋 Группа {group_name}: нет старосты → пропускаю")
             groups_skipped += 1
             continue
 
-        users = get_users_for_attendance_broadcast(university, faculty, group_name)
+        week_type = get_week_type_for_date(tomorrow.date(), university)
 
-        date_str = (datetime.now(MSK) + timedelta(days=1)).strftime("%d.%m.%Y")
+        if university == "РГУ":
+            users = get_users_for_attendance_broadcast_with_subgroup(university, faculty, group_name)
+            by_sg = {}
+            for user_id, full_name, sg in users:
+                by_sg.setdefault(sg or 0, []).append((user_id, full_name))
 
-        text = (
-            f"📋 <b>Отметь явку на завтра</b>\n\n"
-            f"📅 <b>{day_name}, {date_str}</b>\n"
-            f"🎓 Группа: <b>{group_name}</b>\n\n"
-        )
+            for sg, sg_users in by_sg.items():
+                pairs = get_schedule(university, faculty, group_name,
+                                     day_name, week_type,
+                                     subgroup=sg, check_date=tomorrow_iso)
+                if not pairs:
+                    continue
 
-        for pair in pairs:
-            p = _unpack_pair(pair)
-            sg_label = ""
-            if p["subgroup"] == 1:
-                sg_label = " [1 пг]"
-            elif p["subgroup"] == 2:
-                sg_label = " [2 пг]"
-
-            text += f"<b>{p['pair_number']} пара</b>{sg_label} | {p['subject']}\n"
-            text += f"🚪 {p['room'] or '—'} | ⏰ {p['start_time'] or '—'}\n"
-            if p["teacher"]:
-                text += f"👤 {p['teacher']}\n"
-            text += "\n"
-
-        text += "<i>Нажми кнопку под сообщением, чтобы отметить каждую пару.</i>"
-
-        kb = get_tomorrow_attendance_all_kb(pairs)
-
-        for user_id, full_name in users:
-            try:
-                await bot.send_message(
-                    user_id,
-                    text,
-                    parse_mode="HTML",
-                    reply_markup=kb
+                sent, failed = await _send_attendance_broadcast(
+                    bot, pairs, sg_users, university, group_name,
+                    day_name, date_str, sg
                 )
-                total_sent += 1
-                await asyncio.sleep(0.05)
-            except Exception as e:
-                total_failed += 1
-                print(f"[scheduler] Не удалось отправить {user_id}: {e}")
+                total_sent += sent
+                total_failed += failed
+        else:
+            pairs = get_schedule(university, faculty, group_name,
+                                 day_name, week_type, check_date=tomorrow_iso)
+            if not pairs:
+                continue
+
+            users = get_users_for_attendance_broadcast(university, faculty, group_name)
+            sent, failed = await _send_attendance_broadcast(
+                bot, pairs, users, university, group_name,
+                day_name, date_str, subgroup=None
+            )
+            total_sent += sent
+            total_failed += failed
 
     print(f"[scheduler] 📋 Отправлено: {total_sent}, ошибок: {total_failed}, групп пропущено (нет старосты): {groups_skipped}")
+
+
+async def _send_attendance_broadcast(bot, pairs, users, university, group_name,
+                                     day_name, date_str, subgroup=None):
+    """Формирует и отправляет сообщение для одной группы пользователей."""
+    text = (
+        f"📋 <b>Отметь явку на завтра</b>\n\n"
+        f"📅 <b>{day_name}, {date_str}</b>\n"
+        f"🎓 Группа: <b>{group_name}</b>\n"
+    )
+    if subgroup in (1, 2):
+        text += f"👥 Подгруппа: <b>{subgroup}</b>\n"
+    text += "\n"
+
+    for pair in pairs:
+        p = _unpack_pair(pair)
+
+        sg_label = ""
+        if p["subgroup"] == 1:
+            sg_label = " [1 пг]"
+        elif p["subgroup"] == 2:
+            sg_label = " [2 пг]"
+
+        text += f"<b>{p['pair_number']} пара</b>{sg_label} | {p['subject']}\n"
+
+        # Тип занятия
+        if p["lesson_type_full"]:
+            text += f"📌 {p['lesson_type_full']}\n"
+
+        text += f"🚪 {p['room'] or '—'} | ⏰ {p['start_time'] or '—'}\n"
+        if p["teacher"]:
+            text += f"👤 {p['teacher']}\n"
+        text += "\n"
+
+    text += "<i>Нажми кнопку под сообщением, чтобы отметить каждую пару.</i>"
+
+    kb = get_tomorrow_attendance_all_kb(pairs)
+
+    sent = 0
+    failed = 0
+    for user_id, full_name in users:
+        try:
+            await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            failed += 1
+            print(f"[scheduler] Не удалось отправить {user_id}: {e}")
+
+    return sent, failed
+
+
+# ============ ВРЕМЕННЫЙ ПУШ ДЛЯ ТЕСТА ============
+
+async def manual_test_broadcast(bot: Bot):
+    """Ручной запуск рассылки 'Отметь явку на завтра'."""
+    print("[scheduler] 🧪 РУЧНОЙ ЗАПУСК рассылки")
+    await send_tomorrow_attendance_requests(bot)
 
 
 # ============ ЗАПУСК ============
@@ -298,7 +375,6 @@ def start_scheduler(bot: Bot):
 
     scheduler.add_job(cleanup_expired_homework, "date", run_date=datetime.now(MSK) + timedelta(seconds=30), args=[bot], id="cleanup_homework_initial", replace_existing=True)
 
-    # Очистка истёкших пар — каждый день в 3:00 МСК
     scheduler.add_job(cleanup_expired_schedule, "cron", hour=3, minute=0, timezone=MSK, args=[bot], id="cleanup_schedule", replace_existing=True)
 
     scheduler.add_job(send_tomorrow_attendance_requests, "cron", hour=14, minute=0, timezone=MSK, args=[bot], id="tomorrow_attendance", replace_existing=True)
