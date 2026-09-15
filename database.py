@@ -995,3 +995,55 @@ def get_users_for_pair_notifications_with_subgroup(university, faculty, group_na
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+
+# ============ СВОБОДНЫЕ АУДИТОРИИ (РГРТУ) ============
+
+def get_all_rooms_for_university(university="РГРТУ"):
+    """
+    Возвращает множество всех аудиторий, которые когда-либо встречались
+    в расписании этого вуза. Собирается автоматически из таблицы schedule.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT DISTINCT room
+        FROM schedule
+        WHERE university = ?
+          AND room IS NOT NULL AND room != ''
+    """, (university,))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    # Нормализуем: убираем пробелы, приводим к верхнему регистру для дедупликации
+    rooms = set()
+    for (room,) in rows:
+        if room:
+            rooms.add(room.strip())
+    return rooms
+
+
+def get_occupied_rooms(university, day_name, week_type, pair_number, date_iso):
+    """
+    Возвращает множество аудиторий, занятых на конкретной паре.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT room
+        FROM schedule
+        WHERE university = ?
+          AND day_of_week = ?
+          AND week_type = ?
+          AND pair_number = ?
+          AND (valid_until IS NULL OR valid_until = '' OR valid_until >= ?)
+          AND room IS NOT NULL AND room != ''
+    """, (university, day_name, week_type, pair_number, date_iso))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    occupied = set()
+    for (room,) in rows:
+        if room:
+            occupied.add(room.strip())
+    return occupied

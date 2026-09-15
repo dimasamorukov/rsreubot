@@ -26,6 +26,8 @@ from database import (
     get_user_answers_for_pairs,
     get_pairs_for_user_on_date,
     get_user_subgroup,
+    get_all_rooms_for_university,
+    get_occupied_rooms,
 )
 from keyboards import (
     get_homework_actions_kb,
@@ -854,3 +856,198 @@ async def cmd_help(message: types.Message):
 @router.message(F.text == "ℹ️ Инфо")
 async def info_button(message: types.Message):
     await message.answer(INFO_TEXT, parse_mode="HTML")
+
+
+
+# ============ СВОБОДНЫЕ АУДИТОРИИ (РГРТУ) ============
+
+def _is_lab_room(room):
+    """Проверяет, что аудитория — из L-корпуса."""
+    upper = str(room).strip().upper()
+    return (
+        " L" in upper
+        or upper.endswith("L")
+        or upper.startswith("L")
+        or " Л" in upper
+        or upper.endswith("Л")
+        or upper.startswith("Л")
+    )
+
+
+def _is_stadium(room):
+    """Проверяет, что аудитория — Стадион (его надо убрать)."""
+    upper = str(room).strip().upper()
+    return "СТАДИОН" in upper
+
+
+def _split_rooms_by_building(rooms):
+    """
+    Разделяет список аудиторий на две группы:
+    - «лабораторные» (содержат L)
+    - «остальные» (Центральный, Бизнес, Первый и др.)
+    """
+    lab_rooms = []
+    other_rooms = []
+
+    for room in rooms:
+        if _is_stadium(room):
+            continue  # убираем стадион
+        if _is_lab_room(room):
+            lab_rooms.append(room)
+        else:
+            other_rooms.append(room)
+
+    return other_rooms, lab_rooms
+
+
+def _group_rooms_by_first_digit(rooms):
+    """
+    Группирует аудитории по первой цифре.
+    Возвращает dict: {"1": [...], "2": [...], "3": [...], ...}
+    """
+    import re
+    groups = {}
+
+    for room in rooms:
+        m = re.match(r"^(\d)", room)
+        if m:
+            key = m.group(1)
+        else:
+            key = "0"  # без цифры — в конец
+        groups.setdefault(key, []).append(room)
+
+    def sort_key(r):
+        m = re.match(r"(\d+)", r)
+        if m:
+            return (0, int(m.group(1)), r)
+        return (1, 0, r)
+
+    for key in groups:
+        groups[key].sort(key=sort_key)
+
+    return groups
+
+
+def _format_rooms_grouped(rooms, prefix="• "):
+    """Список строк: каждая группа по первой цифре — своя строка."""
+    lines = []
+    groups = _group_rooms_by_first_digit(rooms)
+
+    for key in sorted(groups.keys()):
+        group = groups[key]
+        line = prefix + ", ".join(group)
+        lines.append(line)
+
+    return lines
+
+
+@router.message(F.text == "🚪 Свободные аудитории")
+async def show_free_rooms(message: types.Message):
+    """Свободные аудитории на сегодня: обычные — по группам, L-корпус — одной строкой."""
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь: /start")
+        return
+
+    if user[1] != "РГРТУ":
+        await message.answer(
+            "ℹ️ Функция доступна только для <b>РГРТУ</b>.",
+            parse_mode="HTML"
+        )
+        return
+
+    today = datetime.now(MSK)
+    day_name = DAYS_RU[today.weekday()]
+    week_type = get_current_week_type("РГРТУ")
+    date_iso = today.strftime("%Y-%m-%d")
+    date_str = today.strftime("%d.%m.%Y")
+
+    all_rooms = get_all_rooms_for_university("РГРТУ")
+
+    # Убираем «Стадион» из общего списка
+    all_rooms = {r for r in all_rooms if not _is_stadium(r)}
+
+    if not all_rooms:
+        await message.answer(
+            "⚠️ В базе пока нет данных об аудиториях.\n"
+            "Попробуйте позже — расписание обновляется каждый час."
+        )
+        return
+
+    PAIR_TIMES = {
+        1: "08:10–09:45",
+        2: "09:55–11:30",
+        3: "11:40–13:15",
+        4: "13:35–15:10",
+        5: "15:20–16:55",
+        6: "17:05–18:40",
+        7: "18:50–20:15",
+        8: "20:25–21:50",
+    }
+
+    week_icon = "🔵" if week_type == "числитель" else "🟢"
+
+    header = (
+        f"🚪 <b>Свободные аудитории на сегодня</b>\n"
+        f"📅 {day_name}, {date_str}\n"
+        f"{week_icon} Неделя: <b>{week_type}</b>\n"
+    )
+
+    lines = [header]
+    any_pairs_found = False
+
+    for pair_num in sorted(PAIR_TIMES.keys()):
+        occupied = get_occupied_rooms(
+            "РГРТУ", day_name, week_type, pair_num, date_iso
+        )
+
+        # Убираем стадион из занятых
+        occupied = {r for r in occupied if not _is_stadium(r)}
+
+        if not occupied:
+            continue
+
+        any_pairs_found = True
+
+        free = sorted(all_rooms - occupied)
+        other_rooms, lab_rooms = _split_rooms_by_building(free)
+
+        lines.append(f"\n📚 <b>{pair_num} пара</b> ({PAIR_TIMES[pair_num]})")
+
+        # Обычные — сгруппированы по первой цифре
+        if other_rooms:
+            for line in _format_rooms_grouped(other_rooms, prefix="• "):
+                lines.append(line)
+
+        # L-корпус — ВСЁ В ОДНУ СТРОКУ
+        if lab_rooms:
+            lines.append("🧪 <b>L-корпус:</b> " + ", ".join(lab_rooms))
+
+        if not other_rooms and not lab_rooms:
+            lines.append("❌ Все аудитории заняты")
+
+    if not any_pairs_found:
+        await message.answer(
+            f"📅 На {day_name} ({week_type}) пар нет — все аудитории свободны 🎉"
+        )
+        return
+
+    text = "\n".join(lines)
+    text += f"\n\n<i>Всего аудиторий в базе: {len(all_rooms)}</i>"
+
+    MAX_LEN = 3800
+    if len(text) > MAX_LEN:
+        chunks = []
+        current = ""
+        for line in lines:
+            if len(current) + len(line) + 1 > MAX_LEN:
+                chunks.append(current)
+                current = line
+            else:
+                current += "\n" + line if current else line
+        if current:
+            chunks.append(current)
+        for chunk in chunks:
+            await message.answer(chunk, parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")

@@ -64,19 +64,15 @@ def get_attendance_menu_kb():
 
 
 def get_main_menu(is_admin=False, university=None):
-    """
-    Главное меню.
-    is_admin — показывать ли кнопки старосты
-    university — если "РГРТУ", добавляем кнопку «🔄 Обновить расписание»
-    """
     buttons = [
         [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="📚 ДЗ")],
         [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="✅ Посещение")],
     ]
 
-    # Кнопка обновления расписания — ТОЛЬКО для РГРТУ
+    # Кнопка обновления расписания — только РГРТУ
     if university == "РГРТУ":
         buttons.append([KeyboardButton(text="🔄 Обновить расписание")])
+        buttons.append([KeyboardButton(text="🚪 Свободные аудитории")])  # ← НОВАЯ
 
     buttons.append([KeyboardButton(text="📝 Задолженности"), KeyboardButton(text="ℹ️ Помощь")])
     buttons.append([KeyboardButton(text="ℹ️ Инфо")])
