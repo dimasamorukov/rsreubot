@@ -19,8 +19,8 @@ async def main():
     dp = Dispatcher()
 
     dp.include_router(admin.router)
-    dp.include_router(student.router)
     dp.include_router(profile.router)
+    dp.include_router(student.router)
     dp.include_router(registration.router)
 
     start_scheduler(bot)

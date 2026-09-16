@@ -118,7 +118,8 @@ def get_homework_confirm_delete_kb(homework_id):
 def get_profile_edit_kb(notify_pairs: bool = True,
                         notify_attendance: bool = True,
                         university: str = None,
-                        subgroup: int = 0):
+                        subgroup: int = 0,
+                        role: str = "student"):        # ← НОВЫЙ параметр
     pairs_text = "🔔 Пары: ВКЛ" if notify_pairs else "🔕 Пары: ВЫКЛ"
     attendance_text = "📋 Явка: ВКЛ" if notify_attendance else "📋 Явка: ВЫКЛ"
 
@@ -133,7 +134,6 @@ def get_profile_edit_kb(notify_pairs: bool = True,
         ],
     ]
 
-    # Подгруппа — только для РГУ
     if university == "РГУ":
         sg_label = "не выбрана"
         if subgroup == 1:
@@ -149,10 +149,27 @@ def get_profile_edit_kb(notify_pairs: bool = True,
 
     rows.append([InlineKeyboardButton(text=pairs_text, callback_data="toggle_notify_pairs")])
     rows.append([InlineKeyboardButton(text=attendance_text, callback_data="toggle_notify_attendance")])
+
+    # ← НОВОЕ: кнопка "Получить старосту" — только для студентов
+    if role != "starosta":
+        rows.append([
+            InlineKeyboardButton(
+                text="👑 Получить старосту",
+                callback_data="starosta_apply_start"
+            )
+        ])
+
+  
+    rows.append([
+        InlineKeyboardButton(
+            text="🗑 Удалить профиль",
+            callback_data="delete_profile_start"
+        )
+    ])
+
     rows.append([InlineKeyboardButton(text="🔙 Закрыть", callback_data="edit_close")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 def get_admin_panel_kb(university=None):
     """
@@ -511,5 +528,56 @@ def get_subgroup_choice_kb(current_subgroup: int = 0):
             [InlineKeyboardButton(text=f"{mark(2)}2 подгруппа", callback_data="set_subgroup_2")],
             [InlineKeyboardButton(text=f"{mark(0)}Нет подгруппы (для всех)", callback_data="set_subgroup_0")],
             [InlineKeyboardButton(text="🔙 Закрыть", callback_data="subgroup_close")],
+        ]
+    )
+
+
+# ============ ЗАЯВКИ НА СТАРОСТУ ============
+
+def get_application_review_kb(app_id: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Одобрить",
+                    callback_data=f"app_approve_{app_id}"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"app_reject_{app_id}"
+                ),
+            ],
+        ]
+    )
+
+
+def get_applications_list_kb(apps):
+    """
+    apps — список кортежей (id, user_id, username, fio, ...).
+    Покажем по одной кнопке на заявку.
+    """
+    rows = []
+    for app in apps:
+        app_id = app[0]
+        fio = app[3]
+        group = app[6] if len(app) > 6 else ""
+        short = f"#{app_id} · {fio[:20]}"
+        if group:
+            short += f" · {group[:12]}"
+        rows.append([
+            InlineKeyboardButton(
+                text=short,
+                callback_data=f"app_view_{app_id}"
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def get_delete_profile_confirm_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, удалить", callback_data="delete_profile_yes"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="delete_profile_no"),
+            ],
         ]
     )

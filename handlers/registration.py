@@ -40,11 +40,25 @@ async def cmd_start(message: types.Message, state: FSMContext):
     user = get_user(user_id)
 
     if user:
-        is_admin = user[5] == 'starosta'
+        is_starosta = user[5] == "starosta"
+
+        if is_starosta:
+            text = (
+                f"👑 <b>Ты староста!</b>\n\n"
+                f"С возвращением, {user[4]}!\n"
+                f"ВУЗ: {user[1]} | Группа: {user[3]}\n\n"
+                f"Кнопка <b>«👑 Панель старосты»</b> — в меню ниже."
+            )
+        else:
+            text = (
+                f"С возвращением, {user[4]}!\n"
+                f"ВУЗ: {user[1]} | Группа: {user[3]}"
+            )
+
         await message.answer(
-            f"С возвращением, {user[4]}!\n"
-            f"ВУЗ: {user[1]} | Группа: {user[3]}",
-            reply_markup=get_main_menu(is_admin, university=user[1])
+            text,
+            parse_mode="HTML",
+            reply_markup=get_main_menu(is_starosta, university=user[1])
         )
         return
 
@@ -131,7 +145,8 @@ async def process_name(message: types.Message, state: FSMContext):
         university=data['university'],
         faculty=data['faculty'],
         group_name=data['group'],
-        full_name=message.text.strip()
+        full_name=message.text.strip(),
+        username=message.from_user.username,
     )
 
     await message.answer(

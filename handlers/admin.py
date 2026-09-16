@@ -22,6 +22,11 @@ from database import (
     get_pairs_for_delete,
     delete_schedule_pair_by_id,
     get_schedule_pair_info,
+    get_pending_applications,
+    get_application_by_id,
+    approve_application,
+    reject_application,
+    get_all_starostas,
 )
 from keyboards import (
     get_admin_panel_kb, get_main_menu,
@@ -32,6 +37,8 @@ from keyboards import (
     get_lesson_type_kb, get_subgroup_kb, get_period_end_kb,
     get_days_delete_kb,
     get_pairs_delete_kb,
+    get_application_review_kb,
+    get_applications_list_kb,
 )
 from config import (
     ADMIN_IDS, get_current_week_type, get_week_type_for_date
@@ -1806,3 +1813,170 @@ async def cmd_test_broadcast(message: types.Message, bot: Bot):
     from scheduler import manual_test_broadcast
     await manual_test_broadcast(bot)
     await message.answer("✅ Готово.")
+
+
+
+    # ============ ЗАЯВКИ НА СТАРОСТУ ============
+
+@router.message(Command("applications"))
+async def cmd_applications(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    apps = get_pending_applications()
+    if not apps:
+        await message.answer("📋 Нет заявок на старосту.")
+        return
+
+    text = f"👑 <b>Заявки на старосту ({len(apps)})</b>\n\n"
+    for app in apps:
+        app_id, user_id, username, fio, university, faculty, group_name, *_ = app
+        text += (
+            f"<b>#{app_id}</b> — {_escape_html(fio)}\n"
+            f"   @{_escape_html(username) if username else 'без username'} | <code>{user_id}</code>\n"
+            f"   🏛 {_escape_html(university)} | 🎓 {_escape_html(faculty)} | 👥 {_escape_html(group_name)}\n\n"
+        )
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=get_applications_list_kb(apps)
+    )
+
+
+@router.callback_query(F.data.startswith("app_view_"))
+async def app_view(callback: types.CallbackQuery):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет прав.", show_alert=True)
+        return
+    app_id = int(callback.data.replace("app_view_", ""))
+    app = get_application_by_id(app_id)
+    if not app:
+        await callback.answer("❌ Заявка не найдена.", show_alert=True)
+        return
+
+    (app_id, user_id, username, fio, university, faculty,
+     group_name, photo_group_id, photo_dean_id, status, created_at) = app
+
+    status_label = {
+        "pending": "⏳ На проверке",
+        "approved": "✅ Одобрена",
+        "rejected": "❌ Отклонена",
+    }.get(status, status)
+
+    text = (
+        f"👑 <b>Заявка #{app_id}</b> — {status_label}\n\n"
+        f"👤 @{_escape_html(username) if username else 'без username'} | <code>{user_id}</code>\n"
+        f"📛 ФИО: <b>{_escape_html(fio)}</b>\n"
+        f"🏛 ВУЗ: {_escape_html(university)}\n"
+        f"🎓 Факультет: {_escape_html(faculty)}\n"
+        f"👥 Группа: {_escape_html(group_name)}\n"
+        f"📅 {created_at[:19]}"
+    )
+
+    if status == "pending":
+        kb = get_application_review_kb(app_id)
+    else:
+        kb = None
+
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.message.answer_photo(photo_group_id, caption="📎 Скрин из группы старост")
+    if photo_dean_id:
+        await callback.message.answer_photo(photo_dean_id, caption="📎 Скрин от декана")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("app_approve_"))
+async def app_approve(callback: types.CallbackQuery, bot: Bot):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет прав.", show_alert=True)
+        return
+    app_id = int(callback.data.replace("app_approve_", ""))
+
+    result = approve_application(app_id)
+    if not result:
+        await callback.answer("⚠️ Уже обработана.", show_alert=True)
+        return
+
+    user_id, fio, university, faculty, group_name = result
+
+    try:
+        await bot.send_message(
+            user_id,
+            f"🎉 <b>Твоя заявка на старосту одобрена!</b>\n\n"
+            f"👥 Группа: {group_name}\n"
+            f"Теперь ты староста.\n\n"
+            f"👉 Отправь <b>/start</b>, чтобы обновить меню и получить кнопку "
+            f"<b>«👑 Панель старосты»</b>.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"[starosta] не смог уведомить {user_id}: {e}")
+
+    await callback.message.edit_text(
+        f"✅ <b>Заявка #{app_id} одобрена</b>\n\n"
+        f"👤 {_escape_html(fio)}\n"
+        f"👥 {_escape_html(group_name)}\n"
+        f"Роль старосты выдана.",
+        parse_mode="HTML"
+    )
+    await callback.answer("Одобрено")
+
+
+@router.callback_query(F.data.startswith("app_reject_"))
+async def app_reject(callback: types.CallbackQuery, bot: Bot):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет прав.", show_alert=True)
+        return
+    app_id = int(callback.data.replace("app_reject_", ""))
+
+    result = reject_application(app_id)
+    if not result:
+        await callback.answer("⚠️ Уже обработана.", show_alert=True)
+        return
+
+    user_id, fio = result
+
+    try:
+        await bot.send_message(
+            user_id,
+            f"😔 <b>Заявка на старосту отклонена.</b>\n\n"
+            f"Проверь доказательства и подай заново.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"[starosta] не смог уведомить {user_id}: {e}")
+
+    await callback.message.edit_text(
+        f"❌ <b>Заявка #{app_id} отклонена</b>\n\n"
+        f"👤 {_escape_html(fio)}",
+        parse_mode="HTML"
+    )
+    await callback.answer("Отклонено")
+
+
+@router.message(Command("starosta"))
+async def cmd_starosta_list(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    rows = get_all_starostas()
+    if not rows:
+        await message.answer("📋 Список старост пуст.")
+        return
+
+    text = f"👑 <b>Список старост ({len(rows)})</b>\n\n"
+    for app_id, user_id, username, fio, university, faculty, group_name, created_at in rows:
+        text += (
+            f"<b>{_escape_html(fio)}</b>\n"
+            f"   @{_escape_html(username) if username else 'без username'} | <code>{user_id}</code>\n"
+            f"   🏛 {_escape_html(university)} | 🎓 {_escape_html(faculty)} | 👥 {_escape_html(group_name)}\n"
+            f"   📅 заявка #{app_id} от {created_at[:10]}\n\n"
+        )
+
+    if len(text) > 4000:
+        for i in range(0, len(text), 4000):
+            await message.answer(text[i:i+4000], parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")

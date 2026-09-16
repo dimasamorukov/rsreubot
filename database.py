@@ -111,6 +111,34 @@ def init_db():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS starosta_applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            fio TEXT,
+            university TEXT,
+            faculty TEXT,
+            group_name TEXT,
+            photo_group_id TEXT,
+            photo_dean_id TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # миграции на всякий случай (если таблица уже была)
+    app_migrations = [
+        "ALTER TABLE starosta_applications ADD COLUMN username TEXT",
+        "ALTER TABLE starosta_applications ADD COLUMN photo_group_id TEXT",
+        "ALTER TABLE starosta_applications ADD COLUMN photo_dean_id TEXT",
+    ]
+    for m in app_migrations:
+        try:
+            cursor.execute(m)
+        except sqlite3.OperationalError:
+            pass
+
     migrations = [
         "ALTER TABLE users ADD COLUMN notify_pairs INTEGER DEFAULT 1",
         "ALTER TABLE users ADD COLUMN notify_attendance INTEGER DEFAULT 1",
@@ -188,6 +216,7 @@ def delete_user_completely(user_id):
     cursor.execute("DELETE FROM attendance WHERE user_id = ?", (user_id,))
     cursor.execute("DELETE FROM homework_status WHERE user_id = ?", (user_id,))
     cursor.execute("DELETE FROM debts WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM starosta_applications WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
     return True
@@ -1000,10 +1029,6 @@ def get_users_for_pair_notifications_with_subgroup(university, faculty, group_na
 # ============ СВОБОДНЫЕ АУДИТОРИИ (РГРТУ) ============
 
 def get_all_rooms_for_university(university="РГРТУ"):
-    """
-    Возвращает множество всех аудиторий, которые когда-либо встречались
-    в расписании этого вуза. Собирается автоматически из таблицы schedule.
-    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -1014,8 +1039,7 @@ def get_all_rooms_for_university(university="РГРТУ"):
     """, (university,))
     rows = cursor.fetchall()
     conn.close()
-    
-    # Нормализуем: убираем пробелы, приводим к верхнему регистру для дедупликации
+
     rooms = set()
     for (room,) in rows:
         if room:
@@ -1024,9 +1048,6 @@ def get_all_rooms_for_university(university="РГРТУ"):
 
 
 def get_occupied_rooms(university, day_name, week_type, pair_number, date_iso):
-    """
-    Возвращает множество аудиторий, занятых на конкретной паре.
-    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -1041,9 +1062,138 @@ def get_occupied_rooms(university, day_name, week_type, pair_number, date_iso):
     """, (university, day_name, week_type, pair_number, date_iso))
     rows = cursor.fetchall()
     conn.close()
-    
+
     occupied = set()
     for (room,) in rows:
         if room:
             occupied.add(room.strip())
     return occupied
+
+
+# ============ ЗАЯВКИ НА СТАРОСТУ ============
+
+def add_starosta_application(user_id, username, fio, university, faculty,
+                             group_name, photo_group_id, photo_dean_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO starosta_applications
+        (user_id, username, fio, university, faculty, group_name,
+         photo_group_id, photo_dean_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    """, (user_id, username, fio, university, faculty, group_name,
+          photo_group_id, photo_dean_id))
+    conn.commit()
+    app_id = cursor.lastrowid
+    conn.close()
+    return app_id
+
+
+def has_pending_application(user_id):
+    """Возвращает id заявки, если есть активная (pending), иначе None."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id FROM starosta_applications
+        WHERE user_id = ? AND status = 'pending'
+        ORDER BY id DESC LIMIT 1
+    """, (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_pending_applications():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, user_id, username, fio, university, faculty,
+               group_name, photo_group_id, photo_dean_id, created_at
+        FROM starosta_applications
+        WHERE status = 'pending'
+        ORDER BY id ASC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_application_by_id(app_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, user_id, username, fio, university, faculty,
+               group_name, photo_group_id, photo_dean_id, status, created_at
+        FROM starosta_applications
+        WHERE id = ?
+    """, (app_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def approve_application(app_id):
+    """
+    Одобряет заявку и ВЫДАЁТ роль starosta.
+    Возвращает (user_id, fio, university, faculty, group_name) или None.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT user_id, fio, university, faculty, group_name, status
+        FROM starosta_applications WHERE id = ?
+    """, (app_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    user_id, fio, university, faculty, group_name, status = row
+    if status != 'pending':
+        conn.close()
+        return None
+
+    cursor.execute("""
+        UPDATE users SET role = 'student'
+        WHERE university = ? AND faculty = ? AND group_name = ?
+          AND role = 'starosta' AND user_id != ?
+    """, (university, faculty, group_name, user_id))
+
+    cursor.execute("UPDATE users SET role = 'starosta' WHERE user_id = ?", (user_id,))
+
+    cursor.execute("UPDATE starosta_applications SET status = 'approved' WHERE id = ?", (app_id,))
+
+    conn.commit()
+    conn.close()
+    return (user_id, fio, university, faculty, group_name)
+
+
+def reject_application(app_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT user_id, fio FROM starosta_applications WHERE id = ? AND status = 'pending'
+    """, (app_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    cursor.execute("UPDATE starosta_applications SET status = 'rejected' WHERE id = ?", (app_id,))
+    conn.commit()
+    conn.close()
+    return row  # (user_id, fio)
+
+
+def get_all_starostas():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT a.id, a.user_id, a.username, a.fio,
+               a.university, a.faculty, a.group_name, a.created_at
+        FROM starosta_applications a
+        WHERE a.status = 'approved'
+        ORDER BY a.university, a.faculty, a.group_name
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows

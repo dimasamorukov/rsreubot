@@ -1,4 +1,5 @@
-from aiogram import Router, types, F
+import asyncio
+from aiogram import Router, types, F, Bot
 from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -10,14 +11,18 @@ from database import (
     get_notify_pairs, set_notify_pairs,
     get_notify_attendance, set_notify_attendance,
     get_user_subgroup, set_user_subgroup,
+    add_starosta_application,
+    has_pending_application,
 )
 from keyboards import get_profile_edit_kb, get_subgroup_choice_kb
+from config import ADMIN_IDS
 
 router = Router()
 
 
 class ProfileEdit(StatesGroup):
-    waiting_value = State()
+    waiting_value = State()          # редактирование профиля
+    waiting_application = State()    # подача заявки на старосту
 
 
 # ============ ПОКАЗ ПРОФИЛЯ ============
@@ -36,7 +41,6 @@ async def show_profile(message: types.Message):
     full_name = user[4]
     role = user[5]
 
-    # Подгруппа (только для РГУ)
     subgroup = user[11] if len(user) > 11 else 0
 
     starosta = get_starosta(university, faculty, group_name)
@@ -64,7 +68,6 @@ async def show_profile(message: types.Message):
     pairs_status = "включены" if notify_pairs else "выключены"
     att_status = "включены" if notify_attendance else "выключены"
 
-    # Строка про подгруппу — только для РГУ
     subgroup_line = ""
     if university == "РГУ":
         sg_label = "не выбрана"
@@ -98,11 +101,12 @@ async def show_profile(message: types.Message):
             notify_attendance=notify_attendance,
             university=university,
             subgroup=subgroup,
+            role=role,
         )
     )
 
 
-# ============ РЕДАКТИРОВАНИЕ ============
+# ============ РЕДАКТИРОВАНИЕ ПРОФИЛЯ ============
 
 @router.callback_query(F.data == "edit_university")
 async def edit_university(callback: CallbackQuery, state: FSMContext):
@@ -143,20 +147,19 @@ async def edit_close(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Закрыто")
 
 
-# ============ ПРИЁМ НОВОГО ЗНАЧЕНИЯ ============
+# ============ ПРИЁМ НОВОГО ЗНАЧЕНИЯ ПРОФИЛЯ ============
 
-@router.message(ProfileEdit.waiting_value)
-async def process_new_value(message: types.Message, state: FSMContext):
+@router.message(ProfileEdit.waiting_value, F.text)
+async def universal_waiting_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
+
     field = data.get("field")
     label = data.get("label", "Поле")
-
     new_value = message.text.strip()
 
     if not new_value:
-        await message.answer("❌ Значение не может быть пустым. Попробуй ещё раз.")
+        await message.answer("❌ Значение не может быть пустым.")
         return
-
     if len(new_value) > 200:
         await message.answer("❌ Слишком длинное значение. Максимум 200 символов.")
         return
@@ -169,11 +172,10 @@ async def process_new_value(message: types.Message, state: FSMContext):
         return
 
     await state.clear()
-
     await message.answer(
-        f"✅ {label} обновлён: **{new_value}**\n\n"
-        f"Посмотреть профиль — кнопка «👤 Мой профиль».",
-        parse_mode="Markdown"
+        f"✅ {label} обновлён: <b>{new_value}</b>\n\n"
+        f"Посмотреть профиль — «👤 Профиль».",
+        parse_mode="HTML"
     )
 
 
@@ -185,12 +187,12 @@ async def toggle_notify_pairs(callback: CallbackQuery):
 
     current = get_notify_pairs(user_id)
     new_state = not current
-
     set_notify_pairs(user_id, new_state)
 
     user = get_user(user_id)
     university = user[1] if user else None
     subgroup = user[11] if user and len(user) > 11 else 0
+    role = user[5] if user else "student"
     notify_attendance = get_notify_attendance(user_id)
 
     await callback.message.edit_reply_markup(
@@ -199,6 +201,7 @@ async def toggle_notify_pairs(callback: CallbackQuery):
             notify_attendance=notify_attendance,
             university=university,
             subgroup=subgroup,
+            role=role,
         )
     )
 
@@ -212,12 +215,12 @@ async def toggle_notify_attendance(callback: CallbackQuery):
 
     current = get_notify_attendance(user_id)
     new_state = not current
-
     set_notify_attendance(user_id, new_state)
 
     user = get_user(user_id)
     university = user[1] if user else None
     subgroup = user[11] if user and len(user) > 11 else 0
+    role = user[5] if user else "student"
     notify_pairs = get_notify_pairs(user_id)
 
     await callback.message.edit_reply_markup(
@@ -226,6 +229,7 @@ async def toggle_notify_attendance(callback: CallbackQuery):
             notify_attendance=new_state,
             university=university,
             subgroup=subgroup,
+            role=role,
         )
     )
 
@@ -296,3 +300,276 @@ async def set_subgroup_callback(callback: CallbackQuery):
 async def subgroup_close(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer("Закрыто")
+
+
+# ============ ПОДАЧА ЗАЯВКИ НА СТАРОСТУ ============
+
+@router.callback_query(F.data == "starosta_apply_start")
+async def starosta_apply_start(callback: CallbackQuery, state: FSMContext):
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала /start", show_alert=True)
+        return
+    if user[5] == "starosta":
+        await callback.answer("👑 Ты уже староста.", show_alert=True)
+        return
+
+    # ← Блокировка повторной заявки
+    pending_id = has_pending_application(callback.from_user.id)
+    if pending_id:
+        await callback.answer(
+            f"⏳ У тебя уже есть заявка #{pending_id} на рассмотрении.",
+            show_alert=True
+        )
+        return
+
+    await callback.message.answer(
+        "👑 <b>Заявка на старосту</b>\n\n"
+        "Отправь <b>одним сообщением</b> текст заявки в <b>свободной форме</b> "
+        "(ФИО, ВУЗ, факультет, группа) и, если есть, фото-подтверждение.\n\n"
+        "Например:\n"
+        "<i>Иванов Иван Иванович\n"
+        "РГРТУ, ФВТ, группа 1234\n"
+        "Староста с сентября 2025\n"
+        "Прикладываю скрин из группы старост</i>\n\n"
+        "📎 Фото — по желанию, можно без них.\n"
+        "Если отправишь текст отдельно — заявка не подастся.\n\n"
+        "Отмена: /cancel",
+        parse_mode="HTML"
+    )
+    await state.set_state(ProfileEdit.waiting_application)
+    await state.update_data(starosta_apply=True)
+
+
+# ============ ПРИЁМ ЗАЯВКИ (текст + опционально фото) ============
+
+_album_buffer: dict = {}
+_album_tasks: dict = {}
+_ALBUM_WAIT = 1.2
+
+
+@router.message(ProfileEdit.waiting_application, F.media_group_id, F.photo)
+async def starosta_album_collect(message: types.Message, state: FSMContext, bot: Bot):
+    """Собираем альбом: фото и подпись."""
+    data = await state.get_data()
+    if not data.get("starosta_apply"):
+        return
+
+    gid = message.media_group_id
+    entry = _album_buffer.setdefault(gid, {
+        "photos": [],
+        "caption": "",
+        "user_id": message.from_user.id,
+        "username": message.from_user.username,
+    })
+    entry["photos"].append(message.photo[-1].file_id)
+    if message.caption and not entry["caption"]:
+        entry["caption"] = message.caption
+
+    old = _album_tasks.get(gid)
+    if old:
+        old.cancel()
+    _album_tasks[gid] = asyncio.create_task(_finalize_album(gid, state, bot))
+
+
+async def _finalize_album(gid: str, state: FSMContext, bot: Bot):
+    try:
+        await asyncio.sleep(_ALBUM_WAIT)
+    except asyncio.CancelledError:
+        return
+
+    entry = _album_buffer.pop(gid, None)
+    _album_tasks.pop(gid, None)
+    if not entry:
+        return
+
+    await _process_application(
+        bot=bot,
+        state=state,
+        user_id=entry["user_id"],
+        username=entry["username"],
+        caption=entry["caption"],
+        photos=entry["photos"],
+    )
+
+
+@router.message(ProfileEdit.waiting_application, F.photo, ~F.media_group_id)
+async def starosta_single_photo(message: types.Message, state: FSMContext, bot: Bot):
+    """Одиночное фото (без альбома)."""
+    data = await state.get_data()
+    if not data.get("starosta_apply"):
+        return
+    await _process_application(
+        bot=bot,
+        state=state,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        caption=message.caption or "",
+        photos=[message.photo[-1].file_id],
+    )
+
+
+@router.message(ProfileEdit.waiting_application, F.text)
+async def starosta_text_application(message: types.Message, state: FSMContext, bot: Bot):
+    """Текстовая заявка без фото."""
+    await _process_application(
+        bot=bot,
+        state=state,
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        caption=message.text or "",
+        photos=[],
+    )
+
+
+async def _process_application(bot: Bot, state: FSMContext, user_id: int,
+                                username: str, caption: str, photos: list):
+    """Свободная форма: сохраняем текст как есть, фото опциональны."""
+
+    # ← Двойная защита от повторной заявки
+    pending_id = has_pending_application(user_id)
+    if pending_id:
+        await bot.send_message(
+            user_id,
+            f"⏳ У тебя уже есть заявка #{pending_id} на рассмотрении.\n"
+            f"Дождись ответа администратора.",
+            parse_mode="HTML"
+        )
+        await state.clear()
+        return
+
+    text = (caption or "").strip()
+    if not text and not photos:
+        await bot.send_message(
+            user_id,
+            "⚠️ Отправь текст заявки (можно с фото или без).",
+            parse_mode="HTML"
+        )
+        return
+
+    user = get_user(user_id)
+    if not user:
+        await bot.send_message(user_id, "Сначала /start")
+        await state.clear()
+        return
+
+    # ФИО: первая непустая строка, иначе — из профиля
+    first_line = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            first_line = line
+            break
+
+    fio = first_line[:100] if first_line else (user[4] or "без ФИО")
+
+    photo_group_id = photos[0] if len(photos) > 0 else None
+    photo_dean_id = photos[1] if len(photos) > 1 else None
+
+    app_id = add_starosta_application(
+        user_id=user_id,
+        username=username,
+        fio=fio,
+        university=user[1],
+        faculty=user[2],
+        group_name=user[3],
+        photo_group_id=photo_group_id,
+        photo_dean_id=photo_dean_id,
+    )
+
+    await bot.send_message(
+        user_id,
+        f"✅ Заявка <b>#{app_id}</b> отправлена на проверку администратору.",
+        parse_mode="HTML"
+    )
+
+    header = (
+        f"🔔 <b>Новая заявка на старосту #{app_id}</b>\n\n"
+        f"👤 @{username or '—'} (id: <code>{user_id}</code>)\n"
+        f"🏛 {user[1]} | 🎓 {user[2]} | 👥 {user[3]}\n\n"
+        f"<b>Текст заявки:</b>\n{text or '<i>(без текста)</i>'}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, header, parse_mode="HTML")
+
+            if photos:
+                from aiogram.types import InputMediaPhoto
+                media = [
+                    InputMediaPhoto(media=pid, caption="📎 Подтверждение" if i == 0 else "")
+                    for i, pid in enumerate(photos[:10])
+                ]
+                await bot.send_media_group(admin_id, media=media)
+                for pid in photos[10:]:
+                    await bot.send_photo(admin_id, pid)
+            else:
+                await bot.send_message(admin_id, "📎 Фото не приложены")
+
+            await bot.send_message(admin_id, "Проверить: /applications", parse_mode="HTML")
+        except Exception as e:
+            print(f"[starosta] не смог уведомить админа {admin_id}: {e}")
+
+    await state.clear()
+
+    # ============ УДАЛЕНИЕ ПРОФИЛЯ ============
+
+from keyboards import get_delete_profile_confirm_kb
+
+
+@router.callback_query(F.data == "delete_profile_start")
+async def delete_profile_start(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Профиль уже удалён.", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "⚠️ <b>Удалить профиль?</b>\n\n"
+        f"👤 ФИО: {user[4]}\n"
+        f"🏛 {user[1]} | 👥 {user[3]}\n\n"
+        "После удаления все твои данные (расписание, ДЗ, задолженности, отметки) "
+        "будут стёрты.\n\n"
+        "<i>Действие нельзя отменить. Ты сможешь зарегистрироваться заново через /start.</i>",
+        parse_mode="HTML",
+        reply_markup=get_delete_profile_confirm_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "delete_profile_no")
+async def delete_profile_no(callback: CallbackQuery):
+    await callback.message.edit_text("❌ Удаление отменено.")
+    await callback.answer("Отменено")
+
+
+@router.callback_query(F.data == "delete_profile_yes")
+async def delete_profile_yes(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    if not user:
+        await callback.answer("Профиль уже удалён.", show_alert=True)
+        return
+
+    # Удаляем пользователя и связанные данные
+    from database import delete_user_completely
+    ok = delete_user_completely(user_id)
+
+    if not ok:
+        await callback.message.edit_text("❌ Не удалось удалить профиль.")
+        await callback.answer("Ошибка", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "✅ <b>Профиль удалён.</b>\n\n"
+        "Чтобы продолжить пользоваться ботом, пройди регистрацию заново: /start",
+        parse_mode="HTML"
+    )
+
+    # Просим отправить /start
+    await callback.message.answer(
+        "👉 Отправь /start, чтобы зарегистрироваться заново.",
+        parse_mode="HTML"
+    )
+
+    await callback.answer("Профиль удалён", show_alert=True)
