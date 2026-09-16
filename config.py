@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 FACULTY_IDS = {
     "ФРТ": "1",
@@ -64,6 +65,52 @@ FACULTIES_RGU = [
 SEMESTER_START = "2026-09-07"
 FIRST_WEEK_TYPE = "знаменатель"
 
+# ============ НАПОМИНАНИЯ ============
+
+REMIND_MINUTES = 10
+
+# ============ XP / ГЕЙМИФИКАЦИЯ ============
+
+XP_PER_LEVEL = 10
+
+XP_RULES = {
+    "will":   1.0,
+    "sick":   0.5,
+    "late":   0.5,
+    "absent": 0.0,
+}
+
+# ============ АЛЕРТ ПРОГУЛЬЩИКА ============
+
+ABSENT_STREAK_THRESHOLD = 3   # сколько пропусков подряд = алерт старосте
+
+# ============ ИГРЫ ============
+
+HANGMAN_WORDS = [
+    "АЛГЕБРА", "ФИЗИКА", "ХИМИЯ", "ГЕОМЕТРИЯ", "ИНФОРМАТИКА",
+    "ИСТОРИЯ", "ФИЛОСОФИЯ", "ЭКОНОМИКА", "ПРОГРАММИРОВАНИЕ",
+    "АЛГОРИТМ", "СТУДЕНТ", "СЕМИНАР", "ЛЕКЦИЯ", "ЭКЗАМЕН",
+    "ЗАЧЕТ", "ДИПЛОМ", "КАФЕДРА", "ПРЕПОДАВАТЕЛЬ", "УНИВЕРСИТЕТ",
+]
+
+CITIES_DB = [
+    "Москва", "Питер", "Новосибирск", "Екатеринбург", "Казань",
+    "Нижний Новгород", "Челябинск", "Самара", "Омск", "Ростов",
+    "Уфа", "Красноярск", "Воронеж", "Пермь", "Волгоград",
+    "Краснодар", "Саратов", "Тюмень", "Тольятти", "Ижевск",
+    "Барнаул", "Ульяновск", "Иркутск", "Хабаровск", "Ярославль",
+    "Владивосток", "Махачкала", "Томск", "Оренбург", "Кемерово",
+]
+
+# ============ БЭКАПЫ ============
+
+BACKUP_DIR = "/tmp"
+
+# ============ ПРОМОКОДЫ ============
+
+DEFAULT_PROMO_XP = 5
+DEFAULT_PROMO_USES = 10
+
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -72,13 +119,10 @@ MSK = ZoneInfo("Europe/Moscow")
 
 
 def get_current_week_type(university: str = "РГРТУ") -> str:
-    """Возвращает 'числитель' или 'знаменатель' для вуза (МСК)"""
     start = datetime.strptime(SEMESTER_START, "%Y-%m-%d").date()
     today = datetime.now(MSK).date()
-
     days_diff = (today - start).days
     weeks_diff = days_diff // 7
-
     if weeks_diff % 2 == 0:
         return FIRST_WEEK_TYPE
     else:
@@ -86,12 +130,9 @@ def get_current_week_type(university: str = "РГРТУ") -> str:
 
 
 def get_week_type_for_date(target_date, university: str = "РГРТУ") -> str:
-    """Возвращает 'числитель' или 'знаменатель' для конкретной даты (МСК)"""
     start = datetime.strptime(SEMESTER_START, "%Y-%m-%d").date()
-
     days_diff = (target_date - start).days
     weeks_diff = days_diff // 7
-
     if weeks_diff % 2 == 0:
         return FIRST_WEEK_TYPE
     else:

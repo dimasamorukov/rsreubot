@@ -5,7 +5,11 @@ import re
 import asyncio
 
 from aiogram import Bot
-from config import get_current_week_type, get_week_type_for_date
+from config import (
+    get_current_week_type, get_week_type_for_date,
+    REMIND_MINUTES, ABSENT_STREAK_THRESHOLD,
+)
+
 from database import (
     get_all_groups, get_schedule,
     get_users_for_pair_notifications,
@@ -18,6 +22,7 @@ from database import (
     get_schedule_for_tomorrow_all_groups,
     get_starosta,
     delete_expired_schedule_pairs,
+    get_absentees_streak,
 )
 
 from keyboards import (
@@ -98,7 +103,7 @@ async def check_upcoming_pairs(bot: Bot):
 
 async def _send_pair_notifications(bot, pairs, users, university, faculty, group_name):
     now = datetime.now(MSK)
-    target_time = (now + timedelta(minutes=30)).strftime("%H:%M")
+    target_time = (now + timedelta(minutes=REMIND_MINUTES)).strftime("%H:%M")
 
     for pair in pairs:
         p = _unpack_pair(pair)
@@ -109,7 +114,7 @@ async def _send_pair_notifications(bot, pairs, users, university, faculty, group
         for user_id, full_name in users:
             try:
                 text = (
-                    f"🔔 <b>Через 30 минут пара!</b>\n\n"
+                    f"🔔 <b>Через {REMIND_MINUTES} минут пара!</b>\n\n"
                     f"📖 {p['subject']}\n"
                     f"🚪 Аудитория: {p['room'] or '—'}\n"
                     f"⏰ Начало: {start_short}"
@@ -352,6 +357,53 @@ async def manual_test_broadcast(bot: Bot):
     await send_tomorrow_attendance_requests(bot)
 
 
+
+# ============ АЛЕРТ СТАРОСТЕ О ПРОГУЛЬЩИКАХ ============
+
+async def check_absentees_streaks(bot: Bot):
+    """
+    Раз в день проверяет юзеров с 3+ пропусками подряд.
+    Отправляет алерт старосте группы.
+    """
+    now = datetime.now(MSK)
+    print(f"[scheduler] ⚠️ Проверка прогульщиков: {now.strftime('%d.%m.%Y %H:%M')} МСК")
+
+    groups = get_all_groups()
+    alerts_sent = 0
+
+    for university, faculty, group_name in groups:
+        starosta = get_starosta(university, faculty, group_name)
+        if not starosta:
+            continue
+
+        starosta_id, starosta_name = starosta
+
+        absentees = get_absentees_streak(
+            university, faculty, group_name,
+            threshold=ABSENT_STREAK_THRESHOLD
+        )
+
+        if not absentees:
+            continue
+
+        text = (
+            f"⚠️ <b>Прогульщики группы {group_name}</b>\n\n"
+            f"Студенты с <b>{ABSENT_STREAK_THRESHOLD}+</b> пропусками подряд:\n\n"
+        )
+
+        for uid, full_name, streak in absentees:
+            text += f"• <b>{full_name}</b> — {streak} пропусков\n"
+
+        text += f"\n📅 {now.strftime('%d.%m.%Y')}"
+
+        try:
+            await bot.send_message(starosta_id, text, parse_mode="HTML")
+            alerts_sent += 1
+        except Exception as e:
+            print(f"[scheduler] Не удалось отправить алерт старосте {starosta_id}: {e}")
+
+    print(f"[scheduler] ⚠️ Отправлено алертов: {alerts_sent}")
+
 # ============ ЗАПУСК ============
 
 def start_scheduler(bot: Bot):
@@ -362,8 +414,9 @@ def start_scheduler(bot: Bot):
     scheduler.add_job(cleanup_expired_homework, "date", run_date=datetime.now(MSK) + timedelta(seconds=30), args=[bot], id="cleanup_homework_initial", replace_existing=True)
     scheduler.add_job(cleanup_expired_schedule, "cron", hour=3, minute=0, timezone=MSK, args=[bot], id="cleanup_schedule", replace_existing=True)
     scheduler.add_job(send_tomorrow_attendance_requests, "cron", hour=14, minute=0, timezone=MSK, args=[bot], id="tomorrow_attendance", replace_existing=True)
+    scheduler.add_job(check_absentees_streaks, "cron", hour=18, minute=0, timezone=MSK, args=[bot], id="check_absentees", replace_existing=True)
     scheduler.add_job(auto_update_all_schedules, "cron", hour=0, minute=0, timezone=MSK, args=[bot], id="auto_update_midnight", replace_existing=True)
 
-    print("⏰ Планировщик: напоминания + автообновление РГРТУ + очистка ДЗ + очистка пар + рассылка на завтра")
+    print(f"⏰ Планировщик: напоминания за {REMIND_MINUTES} мин + автообновление РГРТУ + очистка ДЗ + очистка пар + рассылка на завтра + алерты прогульщиков")
 
     scheduler.start()

@@ -2,10 +2,15 @@ from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, CallbackQuery
+)
 from datetime import datetime, timedelta
 from collections import OrderedDict
 import re
+import os
+import csv
+import io
 
 from parser import fetch_schedule_from_api, parse_schedule_for_day
 from database import (
@@ -27,6 +32,17 @@ from database import (
     approve_application,
     reject_application,
     get_all_starostas,
+    # ===== новые =====
+    backup_db,
+    restore_db,
+    create_promo_code,
+    get_all_promo_codes,
+    delete_promo_code,
+    reset_user_xp,
+    reset_group_xp,
+    get_user_xp,
+    get_group_attendance_month,
+    DB_NAME,
 )
 from keyboards import (
     get_admin_panel_kb, get_main_menu,
@@ -39,9 +55,12 @@ from keyboards import (
     get_pairs_delete_kb,
     get_application_review_kb,
     get_applications_list_kb,
+    get_admin_backup_kb,
+    get_export_month_kb,
 )
 from config import (
-    ADMIN_IDS, get_current_week_type, get_week_type_for_date
+    ADMIN_IDS, get_current_week_type, get_week_type_for_date,
+    BACKUP_DIR, DEFAULT_PROMO_XP, DEFAULT_PROMO_USES,
 )
 
 from zoneinfo import ZoneInfo
@@ -67,7 +86,21 @@ def _short_name(full_name):
     return full_name
 
 
-# ============ МАСТЕР ДОБАВЛЕНИЯ ПАРЫ v2 ============
+def _is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+
+def _escape_html(text):
+    if not text:
+        return ""
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+
+
+# ============ МАСТЕР ДОБАВЛЕНИЯ ПАРЫ ============
 
 class AddPair(StatesGroup):
     choosing_week_type = State()
@@ -398,6 +431,7 @@ async def back_to_menu(message):
         reply_markup=get_main_menu(is_admin, university=university)
     )
 
+
 # ============ МАСТЕР ДОБАВЛЕНИЯ ДЗ ============
 
 class AddHomework(StatesGroup):
@@ -546,8 +580,6 @@ async def show_group_attendance(message):
         text += "✅ Буду  ❌ Не приду  🤒 Заболел  ⏰ Задержусь"
         await message.answer(text, parse_mode="Markdown")
 
-
-# ============ ЛОГИ ПОСЕЩАЕМОСТИ ============
 
 @router.message(F.text == "📜 Логи посещаемости")
 async def show_attendance_logs(message):
@@ -742,10 +774,6 @@ async def delete_member_confirm(callback, bot: Bot):
 
 # ============ БЛОКИРОВКА ============
 
-def _is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-
 @router.message(Command("ban"))
 async def ban_command(message):
     if not _is_admin(message.from_user.id):
@@ -839,16 +867,6 @@ from keyboards import (
 USERS_PER_PAGE = 10
 
 
-def _escape_html(text):
-    if not text:
-        return ""
-    return (
-        text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-    )
-
-
 def _format_user_row(user):
     user_id = user[0]
     university = user[1]
@@ -894,6 +912,9 @@ def _format_user_details(user):
     else:
         username_str = "<i>без username</i>"
 
+    # XP
+    xp, level, streak = get_user_xp(user_id)
+
     return (
         f"👤 <b>Информация о пользователе</b>\n\n"
         f"🆔 ID: <code>{user_id}</code>\n"
@@ -903,6 +924,7 @@ def _format_user_details(user):
         f"🏛 <b>ВУЗ:</b> {_escape_html(university)}\n"
         f"<b>Факультет:</b> {_escape_html(faculty)}\n"
         f"<b>Группа:</b> {_escape_html(group_name)}\n\n"
+        f"🎖 <b>XP:</b> {int(xp)} | <b>Уровень:</b> {level} | <b>Streak:</b> {streak}\n\n"
         f"📅 <b>Зарегистрирован:</b> {registered_at[:19]}\n"
         f"🔔 <b>Уведомления:</b> {notif_text}"
     )
@@ -1494,7 +1516,7 @@ async def user_remove_starosta_start(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ============ АДМИН: ОБНОВЛЕНИЕ РАСПИСАНИЯ (ТОЛЬКО РГРТУ) ============
+# ============ ОБНОВЛЕНИЕ РАСПИСАНИЯ (РГРТУ) ============
 
 @router.message(Command("refresh_schedule"))
 async def cmd_refresh_schedule(message: types.Message):
@@ -1606,7 +1628,8 @@ async def cmd_refresh_schedule(message: types.Message):
 
     await message.answer(text, parse_mode="HTML")
 
-# ============ УДАЛЕНИЕ ПАРЫ (ТОЛЬКО РГУ) ============
+
+# ============ УДАЛЕНИЕ ПАРЫ (РГУ) ============
 
 @router.message(F.text == "🗑 Удалить пару")
 async def delete_pair_start(message, state):
@@ -1686,8 +1709,6 @@ async def delete_pair_choose_day(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ⚠️ ВАЖНО: yes/no идут ПЕРВЫМИ, общий — ПОСЛЕ!
-
 @router.callback_query(F.data.startswith("dpair_yes_"))
 async def delete_pair_yes(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
@@ -1741,7 +1762,6 @@ async def delete_pair_no(callback: types.CallbackQuery):
     await callback.answer("Отменено")
 
 
-# ⚠️ ОБЩИЙ — В САМОМ КОНЦЕ, чтобы не перехватывать yes/no
 @router.callback_query(F.data.startswith("dpair_"))
 async def delete_pair_confirm(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
@@ -1804,6 +1824,8 @@ async def delete_pair_confirm(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# ============ TEST BROADCAST ============
+
 @router.message(Command("test_broadcast"))
 async def cmd_test_broadcast(message: types.Message, bot: Bot):
     if not _is_admin(message.from_user.id):
@@ -1815,8 +1837,7 @@ async def cmd_test_broadcast(message: types.Message, bot: Bot):
     await message.answer("✅ Готово.")
 
 
-
-    # ============ ЗАЯВКИ НА СТАРОСТУ ============
+# ============ ЗАЯВКИ НА СТАРОСТУ ============
 
 @router.message(Command("applications"))
 async def cmd_applications(message: types.Message):
@@ -1880,7 +1901,8 @@ async def app_view(callback: types.CallbackQuery):
         kb = None
 
     await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
-    await callback.message.answer_photo(photo_group_id, caption="📎 Скрин из группы старост")
+    if photo_group_id:
+        await callback.message.answer_photo(photo_group_id, caption="📎 Скрин из группы старост")
     if photo_dean_id:
         await callback.message.answer_photo(photo_dean_id, caption="📎 Скрин от декана")
     await callback.answer()
@@ -1980,3 +2002,291 @@ async def cmd_starosta_list(message: types.Message):
             await message.answer(text[i:i+4000], parse_mode="HTML")
     else:
         await message.answer(text, parse_mode="HTML")
+
+
+# ============ БЭКАПЫ ============
+
+@router.message(Command("backup"))
+async def cmd_backup(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    try:
+        path = backup_db()
+        await message.answer_document(
+            FSInputFile(path),
+            caption=f"🗂 <b>Бэкап БД</b>\n"
+                    f"📅 {datetime.now(MSK).strftime('%d.%m.%Y %H:%M')}\n"
+                    f"📦 {os.path.getsize(path) // 1024} KB",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка бэкапа: {e}")
+
+
+@router.message(Command("restore"))
+async def cmd_restore(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    await message.answer(
+        "📥 <b>Пришли .db файл для восстановления.</b>\n\n"
+        "⚠️ Текущая БД будет <b>полностью заменена</b>.\n"
+        "Для отмены — /cancel",
+        parse_mode="HTML"
+    )
+
+
+# ============ ПРОМОКОДЫ ============
+
+@router.message(Command("create_promo"))
+async def cmd_create_promo(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            f"📝 <b>Формат:</b>\n"
+            f"<code>/create_promo &lt;код&gt; [xp] [uses]</code>\n\n"
+            f"<b>Пример:</b>\n"
+            f"<code>/create_promo WELCOME 5 10</code>\n\n"
+            f"По умолчанию: xp={DEFAULT_PROMO_XP}, uses={DEFAULT_PROMO_USES}",
+            parse_mode="HTML"
+        )
+        return
+
+    code = parts[1].upper().strip()
+    try:
+        reward_xp = int(parts[2]) if len(parts) > 2 else DEFAULT_PROMO_XP
+    except ValueError:
+        reward_xp = DEFAULT_PROMO_XP
+
+    try:
+        uses = int(parts[3]) if len(parts) > 3 else DEFAULT_PROMO_USES
+    except ValueError:
+        uses = DEFAULT_PROMO_USES
+
+    ok = create_promo_code(code, reward_xp, uses, created_by=message.from_user.id)
+
+    if ok:
+        await message.answer(
+            f"✅ Промокод <code>{code}</code> создан!\n"
+            f"🎁 XP: <b>{reward_xp}</b>\n"
+            f"👥 Активаций: <b>{uses}</b>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(f"⚠️ Промокод <code>{code}</code> уже существует.", parse_mode="HTML")
+
+
+@router.message(Command("promo_list"))
+async def cmd_promo_list(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    rows = get_all_promo_codes()
+    if not rows:
+        await message.answer("📋 Список промокодов пуст.")
+        return
+
+    text = f"🎁 <b>Промокоды ({len(rows)}):</b>\n\n"
+    for code, reward_xp, uses_left, created_at in rows:
+        text += (
+            f"<code>{_escape_html(code)}</code> — "
+            f"+{reward_xp} XP | "
+            f"осталось: <b>{uses_left}</b>\n"
+            f"   <i>{created_at[:16]}</i>\n\n"
+        )
+
+    text += "<i>Удалить: /delete_promo &lt;код&gt;</i>"
+
+    if len(text) > 4000:
+        for i in range(0, len(text), 4000):
+            await message.answer(text[i:i+4000], parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("delete_promo"))
+async def cmd_delete_promo(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("📝 <code>/delete_promo &lt;код&gt;</code>", parse_mode="HTML")
+        return
+
+    code = parts[1].upper()
+    if delete_promo_code(code):
+        await message.answer(f"✅ Промокод <code>{code}</code> удалён.", parse_mode="HTML")
+    else:
+        await message.answer(f"⚠️ Промокод <code>{code}</code> не найден.", parse_mode="HTML")
+
+
+# ============ СБРОС XP ============
+
+@router.message(Command("reset_xp"))
+async def cmd_reset_xp(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("📝 <code>/reset_xp &lt;user_id&gt;</code>", parse_mode="HTML")
+        return
+
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ ID должен быть числом.")
+        return
+
+    user = get_user(target_id)
+    if not user:
+        await message.answer("❌ Пользователь не зарегистрирован.")
+        return
+
+    reset_user_xp(target_id)
+    await message.answer(
+        f"✅ XP сброшен у <b>{_escape_html(user[4])}</b> (ID <code>{target_id}</code>)",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("reset_group_xp"))
+async def cmd_reset_group_xp(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer(
+            "📝 <code>/reset_group_xp &lt;ВУЗ&gt; &lt;Факультет&gt; &lt;Группа&gt;</code>\n"
+            "Пример: <code>/reset_group_xp РГРТУ ФВТ 1234</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    # парсим остаток
+    group_parts = parts[1].split()
+    if len(group_parts) < 3:
+        await message.answer("❌ Нужно 3 параметра: ВУЗ, Факультет, Группа")
+        return
+
+    university = group_parts[0]
+    faculty = group_parts[1]
+    group_name = group_parts[2]
+
+    reset_group_xp(university, faculty, group_name)
+
+    await message.answer(
+        f"✅ XP сброшен у группы <b>{_escape_html(group_name)}</b>\n"
+        f"🏛 {_escape_html(university)} | 🎓 {_escape_html(faculty)}",
+        parse_mode="HTML"
+    )
+
+    # ============ ЭКСПОРТ ПОСЕЩАЕМОСТИ ============
+
+@router.message(F.text == "📊 Экспорт за месяц")
+async def export_month_start(message: types.Message):
+    user = get_user(message.from_user.id)
+    if not user or user[5] != 'starosta':
+        await message.answer("⛔ Только староста.")
+        return
+
+    await message.answer(
+        "📊 <b>Экспорт посещаемости</b>\n\n"
+        "Выбери период:",
+        parse_mode="HTML",
+        reply_markup=get_export_month_kb()
+    )
+
+
+@router.callback_query(F.data.in_({"export_30", "export_7"}))
+async def export_month_generate(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user or user[5] != 'starosta':
+        await callback.answer("⛔ Нет прав.", show_alert=True)
+        return
+
+    days = 30 if callback.data == "export_30" else 7
+
+    await callback.answer("Готовлю файл...")
+
+    rows = get_group_attendance_month(user[1], user[2], user[3], days=days)
+
+    if not rows:
+        await callback.message.edit_text(
+            f"📊 За последние {days} дней нет отметок.",
+            reply_markup=get_export_month_kb()
+        )
+        return
+
+    status_map = {
+        "will": "Буду",
+        "absent": "Не приду",
+        "sick": "Заболел",
+        "late": "Задержусь",
+    }
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, delimiter=";")
+    writer.writerow(["Дата", "ФИО", "Пара", "Предмет", "Статус"])
+
+    for date, full_name, pair_num, subject, status in rows:
+        writer.writerow([
+            date,
+            full_name,
+            pair_num,
+            subject,
+            status_map.get(status, status),
+        ])
+
+    csv_bytes = buf.getvalue().encode("utf-8-sig")
+
+    file = types.BufferedInputFile(
+        csv_bytes,
+        filename=f"attendance_{user[3]}_{days}d.csv"
+    )
+
+    await callback.message.edit_text(
+        f"✅ <b>Отчёт за {days} дней</b>\n\n"
+        f"📊 Строк: <b>{len(rows)}</b>",
+        parse_mode="HTML"
+    )
+
+    await callback.message.answer_document(
+        file,
+        caption=f"📊 Посещаемость группы {user[3]} за {days} дней"
+    )
+
+
+@router.callback_query(F.data == "export_cancel")
+async def export_cancel(callback: CallbackQuery):
+    try:
+        await callback.message.edit_text("❌ Экспорт отменён.")
+    except Exception:
+        pass
+    await callback.answer("Отменено")
+
+
+# ============ ТЕСТ АЛЕРТА ПРОГУЛЬЩИКОВ ============
+
+@router.message(Command("test_absentees"))
+async def cmd_test_absentees(message: types.Message, bot: Bot):
+    if not _is_admin(message.from_user.id):
+        await message.answer("⛔ Только админ.")
+        return
+    from scheduler import check_absentees_streaks
+    await message.answer("🧪 Запускаю проверку прогульщиков...")
+    await check_absentees_streaks(bot)
+    await message.answer("✅ Готово.")

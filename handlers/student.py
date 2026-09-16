@@ -13,7 +13,7 @@ from parser import (
     format_schedule_grouped,
     LESSON_TYPE_NAMES,
 )
-from config import get_week_type_for_date, get_current_week_type, ADMIN_IDS
+from config import get_week_type_for_date, get_current_week_type, ADMIN_IDS, XP_PER_LEVEL
 from database import (
     get_user, get_schedule, add_schedule_pair,
     get_homework, get_homework_status,
@@ -28,6 +28,11 @@ from database import (
     get_user_subgroup,
     get_all_rooms_for_university,
     get_occupied_rooms,
+    get_user_xp,
+    get_group_rating,
+    get_referral_count,
+    use_promo_code,
+    get_user_attendance_stats,
 )
 from keyboards import (
     get_homework_actions_kb,
@@ -38,6 +43,10 @@ from keyboards import (
     get_schedule_menu_kb,
     get_attendance_menu_kb,
     get_attendance_kb,
+    get_rating_kb,
+    get_promo_menu_kb,
+    get_promo_cancel_kb,
+    get_my_stats_kb,
 )
 
 from zoneinfo import ZoneInfo
@@ -56,6 +65,10 @@ class DebtStates(StatesGroup):
     waiting_new_debt = State()
 
 
+class PromoStates(StatesGroup):
+    waiting_promo = State()
+
+
 # ============ МЕНЮ ============
 
 @router.message(F.text == "📅 Расписание")
@@ -66,6 +79,96 @@ async def schedule_menu(message: types.Message):
 @router.message(F.text == "✅ Посещение")
 async def attendance_menu(message: types.Message):
     await message.answer("✅ Отметь посещение:", reply_markup=get_attendance_menu_kb())
+
+
+# ============ /now ============
+
+@router.message(Command("now"))
+async def cmd_now(message: types.Message):
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь: /start")
+        return
+
+    university = user[1]
+    subgroup = user[11] if len(user) > 11 else 0
+
+    today = datetime.now(MSK)
+    day_name = DAYS_RU[today.weekday()]
+    week_type = get_current_week_type(university)
+    date_iso = today.strftime("%Y-%m-%d")
+
+    pairs = get_schedule(university, user[2], user[3], day_name, week_type,
+                         check_date=date_iso)
+
+    if not pairs:
+        await message.answer(
+            f"📅 Сегодня пар нет 🎉\n"
+            f"<i>{day_name}, {week_type}</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    now_str = today.strftime("%H:%M")
+
+    # ищем текущую или следующую пару
+    current_pair = None
+    next_pair = None
+
+    for p in pairs:
+        start = p[5] or ""
+        end = p[6] or ""
+        if not start:
+            continue
+        # нормализуем
+        s = start.replace(".", ":")
+        e = end.replace(".", ":")
+        if s <= now_str <= e:
+            current_pair = p
+            break
+        if s > now_str and next_pair is None:
+            next_pair = p
+
+    if current_pair:
+        p = current_pair
+        text = (
+            f"🎯 <b>Сейчас идёт пара</b>\n\n"
+            f"📖 {p[2]}\n"
+            f"🚪 {p[4] or '—'}\n"
+            f"⏰ {p[5]}–{p[6] or ''}\n"
+        )
+        if len(p) > 8 and p[8]:
+            text += f"📌 {LESSON_TYPE_NAMES.get(p[8], p[8])}\n"
+        if p[3]:
+            text += f"👤 {p[3]}\n"
+        await message.answer(text, parse_mode="HTML")
+        return
+
+    if next_pair:
+        p = next_pair
+        s = p[5] or ""
+        try:
+            h, m = map(int, s.replace(".", ":").split(":")[:2])
+            start_dt = today.replace(hour=h, minute=m, second=0, microsecond=0)
+            delta = (start_dt - today).seconds // 60
+            when = f"через {delta} мин"
+        except Exception:
+            when = "скоро"
+
+        text = (
+            f"⏭ <b>Следующая пара</b> ({when})\n\n"
+            f"📖 {p[2]}\n"
+            f"🚪 {p[4] or '—'}\n"
+            f"⏰ {p[5]}–{p[6] or ''}\n"
+        )
+        if len(p) > 8 and p[8]:
+            text += f"📌 {LESSON_TYPE_NAMES.get(p[8], p[8])}\n"
+        if p[3]:
+            text += f"👤 {p[3]}\n"
+        await message.answer(text, parse_mode="HTML")
+        return
+
+    await message.answer("✅ На сегодня пары закончились 🎉")
 
 
 # ============ РАСПИСАНИЕ ============
@@ -243,7 +346,7 @@ async def show_schedule_two_weeks(message: types.Message):
         await message.answer(text, parse_mode="Markdown")
 
 
-# ============ ОБНОВЛЕНИЕ РАСПИСАНИЯ (ТОЛЬКО РГРТУ) ============
+# ============ ОБНОВЛЕНИЕ РАСПИСАНИЯ ============
 
 @router.message(F.text == "🔄 Обновить расписание")
 async def student_update_schedule(message: types.Message):
@@ -458,14 +561,11 @@ async def process_attendance(callback: CallbackQuery):
     date_offset = int(parts[3])
     is_broadcast = parts[4] == "1"
 
-    # ⛔ ЗАЩИТА ОТ ЧУЖИХ ОТМЕТОК
-    # Проверяем, что пара принадлежит группе пользователя
     user = get_user(callback.from_user.id)
     if not user:
         await callback.answer("Сначала зарегистрируйтесь: /start", show_alert=True)
         return
 
-    conn_sql = __import__("sqlite3")  # или просто sqlite3 в импортах
     import sqlite3 as _sqlite3
     from database import DB_NAME as _DB_NAME
     conn = _sqlite3.connect(_DB_NAME)
@@ -482,7 +582,6 @@ async def process_attendance(callback: CallbackQuery):
         return
 
     s_uni, s_fac, s_grp = row
-    # Сравниваем с данными пользователя
     if (s_uni, s_fac, s_grp) != (user[1], user[2], user[3]):
         await callback.answer(
             "⛔ Эта пара не из вашей группы",
@@ -500,16 +599,18 @@ async def process_attendance(callback: CallbackQuery):
 
     target_date = (datetime.now(MSK) + timedelta(days=date_offset)).strftime("%Y-%m-%d")
 
-    # Записываем отметку. Функция вернёт True если пара из группы пользователя, False иначе.
     ok = set_attendance(callback.from_user.id, schedule_id, status, target_date)
 
     if not ok:
-        # Пара чужая — не записываем, показываем alert
         await callback.answer("⛔ Эта пара не из вашей группы", show_alert=True)
         return
 
-    # Всё ок — подтверждаем и продолжаем как раньше
-    await callback.answer(f"{status_names.get(status, status)} ({day_word})")
+    # бонус XP показываем
+    from config import XP_RULES
+    xp_delta = XP_RULES.get(status, 0.0)
+    xp_text = f" | +{xp_delta} XP" if xp_delta > 0 else ""
+
+    await callback.answer(f"{status_names.get(status, status)} ({day_word}){xp_text}")
 
     if is_broadcast:
         pairs = get_pairs_for_user_on_date(callback.from_user.id, date_offset)
@@ -703,6 +804,157 @@ async def debt_close(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Закрыто")
 
 
+# ============ РЕЙТИНГ ГРУППЫ ============
+
+@router.message(F.text == "🏆 Рейтинг группы")
+async def show_rating(message: types.Message):
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь: /start")
+        return
+
+    await _send_rating(message, user)
+
+
+@router.callback_query(F.data == "rating_refresh")
+async def rating_refresh(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Нет данных", show_alert=True)
+        return
+
+    await _send_rating(callback.message, user, edit=True)
+    await callback.answer("Обновлено")
+
+
+@router.callback_query(F.data == "rating_close")
+async def rating_close(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.answer("Закрыто")
+
+
+async def _send_rating(message, user, edit=False):
+    university, faculty, group_name = user[1], user[2], user[3]
+
+    rows = get_group_rating(university, faculty, group_name, limit=10)
+
+    if not rows:
+        text = "🏆 **Рейтинг группы**\n\n_Пока никто не набрал XP._"
+    else:
+        text = f"🏆 **Рейтинг группы {group_name}**\n🏛 {university} | {faculty}\n\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, fio, xp, level) in enumerate(rows):
+            icon = medals[i] if i < 3 else f"{i + 1}."
+            short = _short_name(fio)
+            text += f"{icon} {short} — **{int(xp)} XP** (ур. {level})\n"
+
+    kb = get_rating_kb()
+
+    if edit:
+        try:
+            await message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            return
+        except Exception:
+            pass
+
+    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+
+def _short_name(full_name):
+    parts = full_name.strip().split()
+    if len(parts) >= 3:
+        return f"{parts[0]} {parts[1][0]}.{parts[2][0]}."
+    elif len(parts) == 2:
+        return f"{parts[0]} {parts[1][0]}."
+    return full_name
+
+
+# ============ ПРОМОКОДЫ ============
+
+@router.message(Command("promo"))
+async def cmd_promo(message: types.Message, state: FSMContext):
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь: /start")
+        return
+
+    user_id = message.from_user.id
+    ref_count = get_referral_count(user_id)
+    bot_username = (await message.bot.me()).username
+    invite_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+    text = (
+        f"🎁 <b>Промокоды и рефералы</b>\n\n"
+        f"👥 Приглашено друзей: <b>{ref_count}</b>\n\n"
+        f"🔗 Твоя ссылка:\n<code>{invite_link}</code>\n\n"
+        f"За каждого друга — <b>+3 XP</b>!"
+    )
+
+    await message.answer(text, parse_mode="HTML", reply_markup=get_promo_menu_kb())
+
+
+@router.message(Command("invite"))
+async def cmd_invite(message: types.Message):
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь: /start")
+        return
+
+    user_id = message.from_user.id
+    ref_count = get_referral_count(user_id)
+    bot_username = (await message.bot.me()).username
+    invite_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+    await message.answer(
+        f"👥 <b>Пригласи друга</b>\n\n"
+        f"Твоя ссылка:\n<code>{invite_link}</code>\n\n"
+        f"🎁 За каждого друга — <b>+3 XP</b>\n"
+        f"👥 Уже приглашено: <b>{ref_count}</b>",
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "promo_enter")
+async def promo_enter(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "🎁 <b>Введи промокод:</b>\n\n"
+        "<i>Отмена — /cancel</i>",
+        parse_mode="HTML",
+        reply_markup=get_promo_cancel_kb()
+    )
+    await state.set_state(PromoStates.waiting_promo)
+    await callback.answer()
+
+
+@router.message(PromoStates.waiting_promo, F.text)
+async def promo_process(message: types.Message, state: FSMContext):
+    code = message.text.strip().upper()
+
+    status, reward = use_promo_code(message.from_user.id, code)
+
+    if status == "not_found":
+        await message.answer("❌ Такого промокода не существует.")
+    elif status == "expired":
+        await message.answer("❌ Промокод больше не действует.")
+    elif status == "already_used":
+        await message.answer("⚠️ Ты уже активировал этот промокод.")
+    elif status == "ok":
+        await message.answer(
+            f"✅ Промокод активирован!\n"
+            f"🎁 Получено: <b>+{reward} XP</b>",
+            parse_mode="HTML"
+        )
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "promo_close")
+async def promo_close(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Закрыто")
+
+
 # ============ ПРОЧЕЕ ============
 
 @router.message(F.text.contains("Помощь"))
@@ -710,9 +962,12 @@ async def show_help(message: types.Message):
     await message.answer(
         "ℹ️ **Помощь**\n\n"
         "📅 Расписание — пары на сегодня/завтра\n"
+        "🎯 /now — что сейчас идёт\n"
         "📚 ДЗ — домашние задания\n"
         "📝 Задолженности — твои долги\n"
-        "✅ Посещение — отметить пары\n\n"
+        "✅ Посещение — отметить пары\n"
+        "🏆 Рейтинг — топ группы по XP\n"
+        "🎮 Игры — сыграть на перемене\n\n"
         "Если что-то не работает — @hiloetc"
     )
 
@@ -721,8 +976,12 @@ async def show_help(message: types.Message):
 async def my_role(message: types.Message):
     user = get_user(message.from_user.id)
     if user:
+        xp, level, streak = get_user_xp(message.from_user.id)
         await message.answer(
-            f"user_id: <code>{user[0]}</code>\nФИО: {user[4]}\nРоль: <code>{user[5]}</code>",
+            f"user_id: <code>{user[0]}</code>\n"
+            f"ФИО: {user[4]}\n"
+            f"Роль: <code>{user[5]}</code>\n"
+            f"XP: <b>{int(xp)}</b> | Уровень: <b>{level}</b> | Streak: <b>{streak}</b>",
             parse_mode="HTML"
         )
     else:
@@ -784,7 +1043,8 @@ async def hw_delete_start(callback):
     )
     await callback.answer()
 
-    # ============ ИНФО / HELP ============
+
+# ============ ИНФО / HELP ============
 
 INFO_TEXT = """📌 <b>Это учебный бот</b>
 
@@ -792,10 +1052,13 @@ INFO_TEXT = """📌 <b>Это учебный бот</b>
 
 👨‍🎓 <b>ДЛЯ СТУДЕНТОВ</b>
 📅 Расписание — пары на сегодня / завтра / 2 недели
+🎯 /now — что сейчас идёт или будет дальше
 ✅ Посещение — отметить явку
 📚 ДЗ — домашние задания
 📝 Задолженности — твои долги
-👤 Профиль — данные, уведомления, заявка на старосту
+🏆 Рейтинг группы — топ по XP
+🎮 Игры — сыграть на перемене
+🎁 /promo — промокоды и рефералы
 
 👑 <b>ДЛЯ СТАРОСТ</b>
 👑 Панель старосты:
@@ -821,7 +1084,6 @@ async def cmd_help(message: types.Message):
         return
 
     is_admin = message.from_user.id in ADMIN_IDS
-    is_starosta = user[5] == "starosta"
 
     text = INFO_TEXT
     if is_admin:
@@ -835,14 +1097,13 @@ async def cmd_help(message: types.Message):
             "/remove_starosta &lt;id&gt;\n"
             "/ban, /unban, /banlist\n"
             "/broadcast — рассылка всем\n"
-            "/refresh_schedule"
+            "/refresh_schedule\n"
+            "/backup — скачать БД\n"
+            "/create_promo &lt;код&gt; &lt;xp&gt; &lt;uses&gt;\n"
+            "/promo_list — все промокоды"
         )
 
     await message.answer(text, parse_mode="HTML")
-
-@router.message(Command("help"))
-async def cmd_help(message: types.Message):
-    await message.answer(INFO_TEXT, parse_mode="HTML")
 
 
 @router.message(F.text == "ℹ️ Инфо")
@@ -850,11 +1111,9 @@ async def info_button(message: types.Message):
     await message.answer(INFO_TEXT, parse_mode="HTML")
 
 
-
-# ============ СВОБОДНЫЕ АУДИТОРИИ (РГРТУ) ============
+# ============ СВОБОДНЫЕ АУДИТОРИИ ============
 
 def _is_lab_room(room):
-    """Проверяет, что аудитория — из L-корпуса."""
     upper = str(room).strip().upper()
     return (
         " L" in upper
@@ -867,23 +1126,17 @@ def _is_lab_room(room):
 
 
 def _is_stadium(room):
-    """Проверяет, что аудитория — Стадион (его надо убрать)."""
     upper = str(room).strip().upper()
     return "СТАДИОН" in upper
 
 
 def _split_rooms_by_building(rooms):
-    """
-    Разделяет список аудиторий на две группы:
-    - «лабораторные» (содержат L)
-    - «остальные» (Центральный, Бизнес, Первый и др.)
-    """
     lab_rooms = []
     other_rooms = []
 
     for room in rooms:
         if _is_stadium(room):
-            continue  # убираем стадион
+            continue
         if _is_lab_room(room):
             lab_rooms.append(room)
         else:
@@ -893,10 +1146,6 @@ def _split_rooms_by_building(rooms):
 
 
 def _group_rooms_by_first_digit(rooms):
-    """
-    Группирует аудитории по первой цифре.
-    Возвращает dict: {"1": [...], "2": [...], "3": [...], ...}
-    """
     import re
     groups = {}
 
@@ -905,7 +1154,7 @@ def _group_rooms_by_first_digit(rooms):
         if m:
             key = m.group(1)
         else:
-            key = "0"  # без цифры — в конец
+            key = "0"
         groups.setdefault(key, []).append(room)
 
     def sort_key(r):
@@ -921,7 +1170,6 @@ def _group_rooms_by_first_digit(rooms):
 
 
 def _format_rooms_grouped(rooms, prefix="• "):
-    """Список строк: каждая группа по первой цифре — своя строка."""
     lines = []
     groups = _group_rooms_by_first_digit(rooms)
 
@@ -935,7 +1183,6 @@ def _format_rooms_grouped(rooms, prefix="• "):
 
 @router.message(F.text == "🚪 Свободные аудитории")
 async def show_free_rooms(message: types.Message):
-    """Свободные аудитории на сегодня: обычные — по группам, L-корпус — одной строкой."""
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала зарегистрируйтесь: /start")
@@ -955,8 +1202,6 @@ async def show_free_rooms(message: types.Message):
     date_str = today.strftime("%d.%m.%Y")
 
     all_rooms = get_all_rooms_for_university("РГРТУ")
-
-    # Убираем «Стадион» из общего списка
     all_rooms = {r for r in all_rooms if not _is_stadium(r)}
 
     if not all_rooms:
@@ -992,8 +1237,6 @@ async def show_free_rooms(message: types.Message):
         occupied = get_occupied_rooms(
             "РГРТУ", day_name, week_type, pair_num, date_iso
         )
-
-        # Убираем стадион из занятых
         occupied = {r for r in occupied if not _is_stadium(r)}
 
         if not occupied:
@@ -1006,12 +1249,10 @@ async def show_free_rooms(message: types.Message):
 
         lines.append(f"\n📚 <b>{pair_num} пара</b> ({PAIR_TIMES[pair_num]})")
 
-        # Обычные — сгруппированы по первой цифре
         if other_rooms:
             for line in _format_rooms_grouped(other_rooms, prefix="• "):
                 lines.append(line)
 
-        # L-корпус — ВСЁ В ОДНУ СТРОКУ
         if lab_rooms:
             lines.append("🧪 <b>L-корпус:</b> " + ", ".join(lab_rooms))
 
@@ -1043,3 +1284,83 @@ async def show_free_rooms(message: types.Message):
             await message.answer(chunk, parse_mode="HTML")
     else:
         await message.answer(text, parse_mode="HTML")
+
+
+
+        # ============ МОЯ ПОСЕЩАЕМОСТЬ ============
+
+@router.message(F.text == "📉 Моя посещаемость")
+async def my_stats(message: types.Message):
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала зарегистрируйтесь: /start")
+        return
+
+    await _send_my_stats(message, user)
+
+
+@router.callback_query(F.data == "mystats_refresh")
+async def mystats_refresh(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Нет данных", show_alert=True)
+        return
+
+    await _send_my_stats(callback.message, user, edit=True)
+    await callback.answer("Обновлено")
+
+
+@router.callback_query(F.data == "mystats_close")
+async def mystats_close(callback: CallbackQuery):
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Закрыто")
+
+
+async def _send_my_stats(message, user, edit=False):
+    user_id = user[0]
+    stats = get_user_attendance_stats(user_id, days=30)
+
+    total = stats["total"]
+    will = stats["will"]
+    absent = stats["absent"]
+    sick = stats["sick"]
+    late = stats["late"]
+    percent = stats["percent"]
+
+    if total == 0:
+        text = (
+            "📉 <b>Моя посещаемость</b>\n\n"
+            "За последние 30 дней нет отметок.\n\n"
+            "Отмечай пары через «✅ Посещение»!"
+        )
+    else:
+        bar_len = 20
+        filled = int(percent / 100 * bar_len)
+        bar = "▰" * filled + "▱" * (bar_len - filled)
+
+        emoji = "🟢" if percent >= 80 else "🟡" if percent >= 60 else "🔴"
+
+        text = (
+            f"📉 <b>Моя посещаемость за 30 дней</b>\n\n"
+            f"{emoji} <b>{percent}%</b>\n"
+            f"{bar}\n\n"
+            f"✅ Буду: <b>{will}</b>\n"
+            f"❌ Не приду: <b>{absent}</b>\n"
+            f"🤒 Заболел: <b>{sick}</b>\n"
+            f"⏰ Задержусь: <b>{late}</b>\n\n"
+            f"📊 Всего отметок: <b>{total}</b>"
+        )
+
+    kb = get_my_stats_kb()
+
+    if edit:
+        try:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            return
+        except Exception:
+            pass
+
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)

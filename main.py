@@ -7,7 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN
 from database import init_db
 from scheduler import start_scheduler
-from handlers import registration, student, admin, profile
+from handlers import registration, student, admin, profile, games
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,8 +18,10 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
 
+    # ===== ПОДКЛЮЧЕНИЕ РОУТЕРОВ =====
     dp.include_router(admin.router)
     dp.include_router(profile.router)
+    dp.include_router(games.router)       # ← НОВЫЙ
     dp.include_router(student.router)
     dp.include_router(registration.router)
 

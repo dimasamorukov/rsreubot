@@ -13,9 +13,18 @@ from database import (
     get_user_subgroup, set_user_subgroup,
     add_starosta_application,
     has_pending_application,
+    get_user_xp,
+    get_referral_count,
+    use_promo_code,
 )
-from keyboards import get_profile_edit_kb, get_subgroup_choice_kb
-from config import ADMIN_IDS
+from keyboards import (
+    get_profile_edit_kb,
+    get_subgroup_choice_kb,
+    get_delete_profile_confirm_kb,
+    get_promo_menu_kb,
+    get_promo_cancel_kb,
+)
+from config import ADMIN_IDS, XP_PER_LEVEL
 
 router = Router()
 
@@ -23,6 +32,7 @@ router = Router()
 class ProfileEdit(StatesGroup):
     waiting_value = State()          # редактирование профиля
     waiting_application = State()    # подача заявки на старосту
+    waiting_promo = State()          # ввод промокода
 
 
 # ============ ПОКАЗ ПРОФИЛЯ ============
@@ -57,6 +67,17 @@ async def show_profile(message: types.Message):
     pairs_icon = "🔔" if notify_pairs else "🔕"
     att_icon = "📋" if notify_attendance else "📋"
 
+    # XP / уровень
+    xp, level, streak = get_user_xp(user_id)
+    xp_in_level = int(xp % XP_PER_LEVEL)
+    progress = "▰" * xp_in_level + "▱" * (XP_PER_LEVEL - xp_in_level)
+
+    # рефералы
+    ref_count = get_referral_count(user_id)
+
+    # pending заявка
+    pending_id = has_pending_application(user_id)
+
     now = datetime.now(ZoneInfo("Europe/Moscow"))
     date_str = now.strftime("%d.%m.%Y")
     weekday_str = [
@@ -77,6 +98,10 @@ async def show_profile(message: types.Message):
             sg_label = "2"
         subgroup_line = f"**Подгруппа:** {sg_label}\n"
 
+    pending_line = ""
+    if pending_id:
+        pending_line = f"\n⏳ **Заявка на старосту #{pending_id}** на рассмотрении\n"
+
     text = (
         f"👤 **Мой профиль**\n\n"
         f"📅 Сегодня: **{date_str}** ({weekday_str})\n"
@@ -87,9 +112,14 @@ async def show_profile(message: types.Message):
         f"**Группа:** {group_name}\n"
         f"{subgroup_line}"
         f"**Роль:** {role_text}\n"
-        f"**Староста группы:** {starosta_info}\n\n"
+        f"**Староста группы:** {starosta_info}\n"
+        f"{pending_line}\n"
+        f"🎖 **Уровень {level}** | XP: **{int(xp)}**\n"
+        f"{progress} {xp_in_level}/{XP_PER_LEVEL}\n"
+        f"🔥 Streak: **{streak}**\n"
+        f"👥 Приглашено друзей: **{ref_count}**\n\n"
         f"**Уведомления:**\n"
-        f"{pairs_icon} Пары (за 30 мин): **{pairs_status}**\n"
+        f"{pairs_icon} Пары (за 10 мин): **{pairs_status}**\n"
         f"{att_icon} Явка (в 14:00): **{att_status}**\n"
     )
 
@@ -102,6 +132,7 @@ async def show_profile(message: types.Message):
             university=university,
             subgroup=subgroup,
             role=role,
+            has_pending_app=bool(pending_id),
         )
     )
 
@@ -194,6 +225,7 @@ async def toggle_notify_pairs(callback: CallbackQuery):
     subgroup = user[11] if user and len(user) > 11 else 0
     role = user[5] if user else "student"
     notify_attendance = get_notify_attendance(user_id)
+    pending_id = has_pending_application(user_id)
 
     await callback.message.edit_reply_markup(
         reply_markup=get_profile_edit_kb(
@@ -202,6 +234,7 @@ async def toggle_notify_pairs(callback: CallbackQuery):
             university=university,
             subgroup=subgroup,
             role=role,
+            has_pending_app=bool(pending_id),
         )
     )
 
@@ -222,6 +255,7 @@ async def toggle_notify_attendance(callback: CallbackQuery):
     subgroup = user[11] if user and len(user) > 11 else 0
     role = user[5] if user else "student"
     notify_pairs = get_notify_pairs(user_id)
+    pending_id = has_pending_application(user_id)
 
     await callback.message.edit_reply_markup(
         reply_markup=get_profile_edit_kb(
@@ -230,6 +264,7 @@ async def toggle_notify_attendance(callback: CallbackQuery):
             university=university,
             subgroup=subgroup,
             role=role,
+            has_pending_app=bool(pending_id),
         )
     )
 
@@ -257,7 +292,7 @@ async def edit_subgroup(callback: CallbackQuery):
         "Это влияет на:\n"
         "• Какие пары ты видишь в расписании\n"
         "• Какие пары приходят в рассылке «Отметь явку»\n"
-        "• О каких парах напоминать за 30 минут\n\n"
+        "• О каких парах напоминать за 10 минут\n\n"
         "**Для всех** — общие пары, они идут в расписание всем подгруппам.",
         parse_mode="Markdown",
         reply_markup=get_subgroup_choice_kb(current)
@@ -302,7 +337,85 @@ async def subgroup_close(callback: CallbackQuery):
     await callback.answer("Закрыто")
 
 
+# ============ ПРОМОКОДЫ ============
+
+@router.callback_query(F.data == "promo_menu")
+async def promo_menu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    ref_count = get_referral_count(user_id)
+    bot_username = (await callback.bot.me()).username
+    invite_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+
+    text = (
+        f"🎁 <b>Промокоды и рефералы</b>\n\n"
+        f"👥 Приглашено друзей: <b>{ref_count}</b>\n\n"
+        f"🔗 Твоя ссылка:\n<code>{invite_link}</code>\n\n"
+        f"За каждого друга — <b>+3 XP</b>!"
+    )
+
+    await callback.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=get_promo_menu_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "promo_enter")
+async def promo_enter(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "🎁 <b>Введи промокод:</b>\n\n"
+        "<i>Отмена — /cancel</i>",
+        parse_mode="HTML",
+        reply_markup=get_promo_cancel_kb()
+    )
+    await state.set_state(ProfileEdit.waiting_promo)
+    await callback.answer()
+
+
+@router.message(ProfileEdit.waiting_promo, F.text)
+async def promo_process(message: types.Message, state: FSMContext):
+    code = message.text.strip().upper()
+
+    status, reward = use_promo_code(message.from_user.id, code)
+
+    if status == "not_found":
+        await message.answer("❌ Такого промокода не существует.")
+    elif status == "expired":
+        await message.answer("❌ Промокод больше не действует.")
+    elif status == "already_used":
+        await message.answer("⚠️ Ты уже активировал этот промокод.")
+    elif status == "ok":
+        await message.answer(
+            f"✅ Промокод активирован!\n"
+            f"🎁 Получено: <b>+{reward} XP</b>",
+            parse_mode="HTML"
+        )
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "promo_close")
+async def promo_close(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Закрыто")
+
+
 # ============ ПОДАЧА ЗАЯВКИ НА СТАРОСТУ ============
+
+@router.callback_query(F.data == "starosta_apply_pending")
+async def starosta_apply_pending(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    pending_id = has_pending_application(user_id)
+    if not pending_id:
+        await callback.answer("Заявка уже обработана.", show_alert=True)
+        return
+    await callback.answer(
+        f"⏳ Твоя заявка #{pending_id} на рассмотрении.",
+        show_alert=True
+    )
+
 
 @router.callback_query(F.data == "starosta_apply_start")
 async def starosta_apply_start(callback: CallbackQuery, state: FSMContext):
@@ -314,7 +427,6 @@ async def starosta_apply_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("👑 Ты уже староста.", show_alert=True)
         return
 
-    # ← Блокировка повторной заявки
     pending_id = has_pending_application(callback.from_user.id)
     if pending_id:
         await callback.answer(
@@ -341,7 +453,7 @@ async def starosta_apply_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(starosta_apply=True)
 
 
-# ============ ПРИЁМ ЗАЯВКИ (текст + опционально фото) ============
+# ============ ПРИЁМ ЗАЯВКИ ============
 
 _album_buffer: dict = {}
 _album_tasks: dict = {}
@@ -350,7 +462,6 @@ _ALBUM_WAIT = 1.2
 
 @router.message(ProfileEdit.waiting_application, F.media_group_id, F.photo)
 async def starosta_album_collect(message: types.Message, state: FSMContext, bot: Bot):
-    """Собираем альбом: фото и подпись."""
     data = await state.get_data()
     if not data.get("starosta_apply"):
         return
@@ -395,7 +506,6 @@ async def _finalize_album(gid: str, state: FSMContext, bot: Bot):
 
 @router.message(ProfileEdit.waiting_application, F.photo, ~F.media_group_id)
 async def starosta_single_photo(message: types.Message, state: FSMContext, bot: Bot):
-    """Одиночное фото (без альбома)."""
     data = await state.get_data()
     if not data.get("starosta_apply"):
         return
@@ -411,7 +521,6 @@ async def starosta_single_photo(message: types.Message, state: FSMContext, bot: 
 
 @router.message(ProfileEdit.waiting_application, F.text)
 async def starosta_text_application(message: types.Message, state: FSMContext, bot: Bot):
-    """Текстовая заявка без фото."""
     await _process_application(
         bot=bot,
         state=state,
@@ -424,9 +533,6 @@ async def starosta_text_application(message: types.Message, state: FSMContext, b
 
 async def _process_application(bot: Bot, state: FSMContext, user_id: int,
                                 username: str, caption: str, photos: list):
-    """Свободная форма: сохраняем текст как есть, фото опциональны."""
-
-    # ← Двойная защита от повторной заявки
     pending_id = has_pending_application(user_id)
     if pending_id:
         await bot.send_message(
@@ -453,7 +559,6 @@ async def _process_application(bot: Bot, state: FSMContext, user_id: int,
         await state.clear()
         return
 
-    # ФИО: первая непустая строка, иначе — из профиля
     first_line = ""
     for line in text.splitlines():
         line = line.strip()
@@ -512,10 +617,8 @@ async def _process_application(bot: Bot, state: FSMContext, user_id: int,
 
     await state.clear()
 
-    # ============ УДАЛЕНИЕ ПРОФИЛЯ ============
 
-from keyboards import get_delete_profile_confirm_kb
-
+# ============ УДАЛЕНИЕ ПРОФИЛЯ ============
 
 @router.callback_query(F.data == "delete_profile_start")
 async def delete_profile_start(callback: CallbackQuery):
@@ -528,7 +631,7 @@ async def delete_profile_start(callback: CallbackQuery):
         "⚠️ <b>Удалить профиль?</b>\n\n"
         f"👤 ФИО: {user[4]}\n"
         f"🏛 {user[1]} | 👥 {user[3]}\n\n"
-        "После удаления все твои данные (расписание, ДЗ, задолженности, отметки) "
+        "После удаления все твои данные (расписание, ДЗ, задолженности, отметки, XP) "
         "будут стёрты.\n\n"
         "<i>Действие нельзя отменить. Ты сможешь зарегистрироваться заново через /start.</i>",
         parse_mode="HTML",
@@ -551,7 +654,6 @@ async def delete_profile_yes(callback: CallbackQuery):
         await callback.answer("Профиль уже удалён.", show_alert=True)
         return
 
-    # Удаляем пользователя и связанные данные
     from database import delete_user_completely
     ok = delete_user_completely(user_id)
 
@@ -566,7 +668,6 @@ async def delete_profile_yes(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-    # Просим отправить /start
     await callback.message.answer(
         "👉 Отправь /start, чтобы зарегистрироваться заново.",
         parse_mode="HTML"

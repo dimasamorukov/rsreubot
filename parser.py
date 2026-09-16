@@ -186,7 +186,6 @@ def format_schedule_grouped(pairs: list, day_name: str, week_type: str,
     text += "**\n"
     text += f"{week_icon} Неделя: **{week_type}**\n\n"
 
-    # Группируем по номеру пары
     by_number = OrderedDict()
     for p in pairs:
         num = p.get("pair_number", 0)
@@ -202,14 +201,12 @@ def format_schedule_grouped(pairs: list, day_name: str, week_type: str,
         header += ")\n"
         text += header
 
-        # Сортировка: 0 (для всех), 1, 2
         group.sort(key=lambda x: (x.get('subgroup', 0) or 0))
 
         printed_any = False
         for p in group:
             sg = p.get('subgroup', 0) or 0
 
-            # Фильтр по подгруппе студента
             if user_subgroup and sg != 0 and sg != user_subgroup:
                 continue
 
@@ -237,8 +234,6 @@ def format_schedule_grouped(pairs: list, day_name: str, week_type: str,
                 text += f"┃ 🚪 {p['room']}\n"
 
         if not printed_any:
-            # Все пары отфильтрованы — пропускаем блок
-            # Убираем заголовок, который уже добавили
             text = text[:-(len(header))]
 
         text += "➖➖➖➖➖\n"

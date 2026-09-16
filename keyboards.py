@@ -4,6 +4,8 @@ from aiogram.types import (
 )
 
 
+# ============ РЕГИСТРАЦИЯ ============
+
 def get_universities_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -42,6 +44,8 @@ def get_faculties_kb(university: str = "РГРТУ"):
         )
 
 
+# ============ МЕНЮ ============
+
 def get_schedule_menu_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -69,11 +73,12 @@ def get_main_menu(is_admin=False, university=None):
         [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="✅ Посещение")],
     ]
 
-    # Кнопка обновления расписания — только РГРТУ
     if university == "РГРТУ":
         buttons.append([KeyboardButton(text="🔄 Обновить расписание")])
-        buttons.append([KeyboardButton(text="🚪 Свободные аудитории")])  # ← НОВАЯ
+        buttons.append([KeyboardButton(text="🚪 Свободные аудитории")])
 
+    buttons.append([KeyboardButton(text="🏆 Рейтинг группы"), KeyboardButton(text="🎮 Игры")])
+    buttons.append([KeyboardButton(text="📉 Моя посещаемость")])
     buttons.append([KeyboardButton(text="📝 Задолженности"), KeyboardButton(text="ℹ️ Помощь")])
     buttons.append([KeyboardButton(text="ℹ️ Инфо")])
 
@@ -82,6 +87,8 @@ def get_main_menu(is_admin=False, university=None):
 
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
+
+# ============ ДЗ ============
 
 def get_homework_actions_kb(homework_id):
     return InlineKeyboardMarkup(
@@ -115,11 +122,14 @@ def get_homework_confirm_delete_kb(homework_id):
     )
 
 
+# ============ ПРОФИЛЬ ============
+
 def get_profile_edit_kb(notify_pairs: bool = True,
                         notify_attendance: bool = True,
                         university: str = None,
                         subgroup: int = 0,
-                        role: str = "student"):        # ← НОВЫЙ параметр
+                        role: str = "student",
+                        has_pending_app: bool = False):
     pairs_text = "🔔 Пары: ВКЛ" if notify_pairs else "🔕 Пары: ВЫКЛ"
     attendance_text = "📋 Явка: ВКЛ" if notify_attendance else "📋 Явка: ВЫКЛ"
 
@@ -150,16 +160,22 @@ def get_profile_edit_kb(notify_pairs: bool = True,
     rows.append([InlineKeyboardButton(text=pairs_text, callback_data="toggle_notify_pairs")])
     rows.append([InlineKeyboardButton(text=attendance_text, callback_data="toggle_notify_attendance")])
 
-    # ← НОВОЕ: кнопка "Получить старосту" — только для студентов
     if role != "starosta":
-        rows.append([
-            InlineKeyboardButton(
-                text="👑 Получить старосту",
-                callback_data="starosta_apply_start"
-            )
-        ])
+        if has_pending_app:
+            rows.append([
+                InlineKeyboardButton(
+                    text="⏳ Заявка на рассмотрении",
+                    callback_data="starosta_apply_pending"
+                )
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton(
+                    text="👑 Получить старосту",
+                    callback_data="starosta_apply_start"
+                )
+            ])
 
-  
     rows.append([
         InlineKeyboardButton(
             text="🗑 Удалить профиль",
@@ -171,18 +187,16 @@ def get_profile_edit_kb(notify_pairs: bool = True,
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+# ============ ПАНЕЛЬ СТАРОСТЫ ============
+
 def get_admin_panel_kb(university=None):
-    """
-    Панель старосты.
-    university — если "РГУ", добавляем кнопку «🗑 Удалить пару».
-    """
     buttons = [
         [KeyboardButton(text="➕ ДЗ"), KeyboardButton(text="➕ Пара")],
         [KeyboardButton(text="👥 Список группы"), KeyboardButton(text="📊 Посещаемость")],
-        [KeyboardButton(text="📜 Логи посещаемости")],
+        [KeyboardButton(text="📜 Логи посещаемости"), KeyboardButton(text="📊 Экспорт за месяц")],
     ]
 
-    # Удаление пары — ТОЛЬКО для РГУ
     if university == "РГУ":
         buttons.append([KeyboardButton(text="🗑 Удалить пару")])
 
@@ -190,6 +204,8 @@ def get_admin_panel_kb(university=None):
 
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
+
+# ============ ДНИ / ПОДТВЕРЖДЕНИЯ ============
 
 def get_days_kb(prefix="day"):
     return InlineKeyboardMarkup(
@@ -217,6 +233,8 @@ def get_confirm_kb(prefix):
     )
 
 
+# ============ ЗАДОЛЖЕННОСТИ ============
+
 def get_debts_menu_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -238,6 +256,8 @@ def get_debts_delete_kb(debts):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# ============ СПИСОК ГРУППЫ ============
+
 def get_group_members_delete_kb(members):
     rows = []
     for user_id, full_name, role in members:
@@ -256,6 +276,8 @@ def get_group_list_actions_kb():
         ]
     )
 
+
+# ============ USERS ============
 
 def get_users_pagination_kb(page: int, total_pages: int):
     rows = []
@@ -331,6 +353,8 @@ def get_remove_starosta_confirm_kb(user_id: int):
     )
 
 
+# ============ ПОСЕЩЕНИЕ ============
+
 def get_attendance_kb(schedule_id, date_offset=0):
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -379,7 +403,7 @@ def get_tomorrow_attendance_all_kb(pairs: list, user_answers: dict = None):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# ============ МАСТЕР ДОБАВЛЕНИЯ ПАРЫ v2 ============
+# ============ МАСТЕР ПАРЫ ============
 
 def get_week_type_kb():
     return InlineKeyboardMarkup(
@@ -450,10 +474,9 @@ def get_period_end_kb():
     )
 
 
-# ============ УДАЛЕНИЕ ПАРЫ (РГУ) ============
+# ============ УДАЛЕНИЕ ПАРЫ ============
 
 def get_days_delete_kb():
-    """Выбор дня недели для удаления пары."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -474,37 +497,15 @@ def get_days_delete_kb():
 
 
 def get_pairs_delete_kb(pairs):
-    """
-    pairs — список кортежей вида
-    (schedule_id, pair_number, subject, week_type, subgroup, start_time, teacher, room)
-    """
     rows = []
-
     for p in pairs:
         schedule_id, pair_number, subject, week_type, subgroup, start_time, teacher, room = p[:8]
-
-        # Пометки
-        wt_label = "🔵" if week_type == "числитель" else "🟢"
-        sg_label = ""
-        if subgroup == 1:
-            sg_label = " [1 пг]"
-        elif subgroup == 2:
-            sg_label = " [2 пг]"
-
-        # Урезаем длинный предмет
         short_subj = subject if len(subject) <= 25 else subject[:22] + "..."
-
         btn_text = f"{pair_number} пара{_sg_icon(subgroup)} · {short_subj}"
-
         rows.append([
-            InlineKeyboardButton(
-                text=btn_text,
-                callback_data=f"dpair_{schedule_id}"
-            )
+            InlineKeyboardButton(text=btn_text, callback_data=f"dpair_{schedule_id}")
         ])
-
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dpd_back")])
-
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -515,10 +516,10 @@ def _sg_icon(subgroup):
         return " [2пг]"
     return ""
 
-# ============ ПОДГРУППА В ПРОФИЛЕ (РГУ) ============
+
+# ============ ПОДГРУППА В ПРОФИЛЕ ============
 
 def get_subgroup_choice_kb(current_subgroup: int = 0):
-    """Клавиатура выбора подгруппы в профиле."""
     def mark(val):
         return "✅ " if current_subgroup == val else ""
 
@@ -538,24 +539,14 @@ def get_application_review_kb(app_id: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="✅ Одобрить",
-                    callback_data=f"app_approve_{app_id}"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Отклонить",
-                    callback_data=f"app_reject_{app_id}"
-                ),
+                InlineKeyboardButton(text="✅ Одобрить", callback_data=f"app_approve_{app_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"app_reject_{app_id}"),
             ],
         ]
     )
 
 
 def get_applications_list_kb(apps):
-    """
-    apps — список кортежей (id, user_id, username, fio, ...).
-    Покажем по одной кнопке на заявку.
-    """
     rows = []
     for app in apps:
         app_id = app[0]
@@ -565,12 +556,10 @@ def get_applications_list_kb(apps):
         if group:
             short += f" · {group[:12]}"
         rows.append([
-            InlineKeyboardButton(
-                text=short,
-                callback_data=f"app_view_{app_id}"
-            )
+            InlineKeyboardButton(text=short, callback_data=f"app_view_{app_id}")
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def get_delete_profile_confirm_kb():
     return InlineKeyboardMarkup(
@@ -579,5 +568,178 @@ def get_delete_profile_confirm_kb():
                 InlineKeyboardButton(text="✅ Да, удалить", callback_data="delete_profile_yes"),
                 InlineKeyboardButton(text="❌ Отмена", callback_data="delete_profile_no"),
             ],
+        ]
+    )
+
+
+# ============ РЕЙТИНГ / XP ============
+
+def get_rating_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="rating_refresh")],
+            [InlineKeyboardButton(text="🔙 Закрыть", callback_data="rating_close")],
+        ]
+    )
+
+
+# ============ ПРОМОКОДЫ ============
+
+def get_promo_menu_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="promo_enter")],
+            [InlineKeyboardButton(text="👥 Пригласить друга", callback_data="promo_invite")],
+            [InlineKeyboardButton(text="🔙 Закрыть", callback_data="promo_close")],
+        ]
+    )
+
+
+def get_promo_cancel_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="promo_close")],
+        ]
+    )
+
+
+# ============ ИГРЫ ============
+
+def get_games_menu_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🎯 Виселица", callback_data="game_hangman"),
+                InlineKeyboardButton(text="🐂 Быки и коровы", callback_data="game_bulls"),
+            ],
+            [
+                InlineKeyboardButton(text="⭕❌ Крестики-нолики", callback_data="game_tictactoe"),
+                InlineKeyboardButton(text="💣 Сапёр", callback_data="game_mines"),
+            ],
+            [
+                InlineKeyboardButton(text="📊 Моя статистика", callback_data="game_stats"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Закрыть", callback_data="game_close"),
+            ],
+        ]
+    )
+
+
+def get_hangman_kb(word: str, guessed: set, wrong: int):
+    alphabet = "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+    rows = []
+    row = []
+
+    for letter in alphabet:
+        if letter in guessed:
+            row.append(InlineKeyboardButton(
+                text=f"·{letter}·",
+                callback_data="hangman_noop"
+            ))
+        else:
+            row.append(InlineKeyboardButton(
+                text=letter,
+                callback_data=f"hangman_letter_{letter}"
+            ))
+        if len(row) == 8:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton(text="🛑 Сдаться", callback_data="hangman_giveup")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_tictactoe_kb(board: list):
+    rows = []
+    for i in range(0, 9, 3):
+        row = []
+        for j in range(3):
+            idx = i + j
+            cell = board[idx] if board[idx] else "·"
+            row.append(InlineKeyboardButton(
+                text=cell,
+                callback_data=f"ttt_cell_{idx}"
+            ))
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton(text="🛑 Сдаться", callback_data="ttt_giveup")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_bulls_giveup_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛑 Сдаться", callback_data="bulls_giveup")],
+        ]
+    )
+
+
+def get_mines_kb(board_state: list, size: int = 5):
+    rows = []
+    for i in range(size):
+        row = []
+        for j in range(size):
+            idx = i * size + j
+            state = board_state[idx]
+            if state == "hidden":
+                text = "⬜"
+            elif state == "open":
+                text = "🟦"
+            elif state == "flag":
+                text = "🚩"
+            elif state == "mine":
+                text = "💣"
+            else:
+                text = "⬜"
+
+            row.append(InlineKeyboardButton(
+                text=text,
+                callback_data=f"mines_open_{idx}"
+            ))
+        rows.append(row)
+
+    rows.append([
+        InlineKeyboardButton(text="🚩 Режим флажка", callback_data="mines_flag_mode"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🛑 Сдаться", callback_data="mines_giveup"),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ============ АДМИН: БЭКАПЫ ============
+
+def get_admin_backup_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Скачать БД", callback_data="backup_download")],
+            [InlineKeyboardButton(text="🔙 Закрыть", callback_data="backup_close")],
+        ]
+    )
+
+
+# ============ ПОСЕЩАЕМОСТЬ 2.0 ============
+
+def get_my_stats_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="mystats_refresh")],
+            [InlineKeyboardButton(text="🔙 Закрыть", callback_data="mystats_close")],
+        ]
+    )
+
+
+def get_export_month_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📊 За 30 дней", callback_data="export_30")],
+            [InlineKeyboardButton(text="📊 За 7 дней", callback_data="export_7")],
+            [InlineKeyboardButton(text="🔙 Отмена", callback_data="export_cancel")],
         ]
     )

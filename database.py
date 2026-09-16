@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import shutil
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -27,7 +28,8 @@ def init_db():
             notify_pairs INTEGER DEFAULT 1,
             notify_attendance INTEGER DEFAULT 1,
             username TEXT,
-            subgroup INTEGER DEFAULT 0
+            subgroup INTEGER DEFAULT 0,
+            referred_by INTEGER DEFAULT NULL
         )
     """)
 
@@ -127,23 +129,69 @@ def init_db():
         )
     """)
 
-    # миграции на всякий случай (если таблица уже была)
-    app_migrations = [
-        "ALTER TABLE starosta_applications ADD COLUMN username TEXT",
-        "ALTER TABLE starosta_applications ADD COLUMN photo_group_id TEXT",
-        "ALTER TABLE starosta_applications ADD COLUMN photo_dean_id TEXT",
-    ]
-    for m in app_migrations:
-        try:
-            cursor.execute(m)
-        except sqlite3.OperationalError:
-            pass
+    # ============ НОВЫЕ ТАБЛИЦЫ ============
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_xp (
+            user_id INTEGER PRIMARY KEY,
+            xp REAL DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            streak INTEGER DEFAULT 0,
+            last_attendance_date TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            reward_xp INTEGER DEFAULT 5,
+            uses_left INTEGER DEFAULT 10,
+            created_by INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS promo_uses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT,
+            user_id INTEGER,
+            used_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(code, user_id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER,
+            referred_id INTEGER UNIQUE,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS games_stats (
+            user_id INTEGER PRIMARY KEY,
+            hangman_wins INTEGER DEFAULT 0,
+            hangman_games INTEGER DEFAULT 0,
+            bulls_wins INTEGER DEFAULT 0,
+            bulls_games INTEGER DEFAULT 0,
+            tictactoe_wins INTEGER DEFAULT 0,
+            tictactoe_games INTEGER DEFAULT 0,
+            mines_wins INTEGER DEFAULT 0,
+            mines_games INTEGER DEFAULT 0
+        )
+    """)
+
+    # миграции
     migrations = [
         "ALTER TABLE users ADD COLUMN notify_pairs INTEGER DEFAULT 1",
         "ALTER TABLE users ADD COLUMN notify_attendance INTEGER DEFAULT 1",
         "ALTER TABLE users ADD COLUMN username TEXT",
         "ALTER TABLE users ADD COLUMN subgroup INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN referred_by INTEGER DEFAULT NULL",
         "ALTER TABLE schedule ADD COLUMN lesson_type TEXT",
         "ALTER TABLE schedule ADD COLUMN subgroup INTEGER DEFAULT 0",
         "ALTER TABLE schedule ADD COLUMN valid_until TEXT",
@@ -161,13 +209,15 @@ def init_db():
 
 # ============ ПОЛЬЗОВАТЕЛИ ============
 
-def register_user(user_id, university, faculty, group_name, full_name, username=None):
+def register_user(user_id, university, faculty, group_name, full_name,
+                  username=None, referred_by=None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT OR REPLACE INTO users (user_id, university, faculty, group_name, full_name, username)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (user_id, university, faculty, group_name, full_name, username))
+        INSERT OR REPLACE INTO users
+        (user_id, university, faculty, group_name, full_name, username, referred_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, university, faculty, group_name, full_name, username, referred_by))
     conn.commit()
     conn.close()
 
@@ -217,6 +267,8 @@ def delete_user_completely(user_id):
     cursor.execute("DELETE FROM homework_status WHERE user_id = ?", (user_id,))
     cursor.execute("DELETE FROM debts WHERE user_id = ?", (user_id,))
     cursor.execute("DELETE FROM starosta_applications WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM user_xp WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM games_stats WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
     return True
@@ -684,7 +736,7 @@ def delete_debt(debt_id):
     conn.close()
 
 
-# ============ ПОСЕЩАЕМОСТЬ ============
+# ============ ПОСЕЩАЕМОСТЬ + XP ============
 
 def set_attendance(user_id, schedule_id, status, date):
     conn = sqlite3.connect(DB_NAME)
@@ -723,7 +775,41 @@ def set_attendance(user_id, schedule_id, status, date):
     """, (user_id, schedule_id, status, date, datetime.now(MSK).isoformat()))
     conn.commit()
     conn.close()
+
+    # ← начисляем XP
+    _update_xp_for_attendance(user_id, status)
+
     return True
+
+
+def _update_xp_for_attendance(user_id, status):
+    """Пересчитывает XP по последнему статусу отметки."""
+    from config import XP_RULES
+
+    xp_delta = XP_RULES.get(status, 0.0)
+    if xp_delta <= 0:
+        return
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT xp FROM user_xp WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        cursor.execute("""
+            INSERT INTO user_xp (user_id, xp, level, streak, last_attendance_date)
+            VALUES (?, ?, 1, 1, ?)
+        """, (user_id, xp_delta, datetime.now(MSK).strftime("%Y-%m-%d")))
+    else:
+        new_xp = row[0] + xp_delta
+        new_level = 1 + int(new_xp // 10)
+        cursor.execute("""
+            UPDATE user_xp SET xp = ?, level = ? WHERE user_id = ?
+        """, (new_xp, new_level, user_id))
+
+    conn.commit()
+    conn.close()
 
 
 def get_attendance_for_day_grouped(university, faculty, group_name, date):
@@ -1090,7 +1176,6 @@ def add_starosta_application(user_id, username, fio, university, faculty,
 
 
 def has_pending_application(user_id):
-    """Возвращает id заявки, если есть активная (pending), иначе None."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -1133,10 +1218,6 @@ def get_application_by_id(app_id):
 
 
 def approve_application(app_id):
-    """
-    Одобряет заявку и ВЫДАЁТ роль starosta.
-    Возвращает (user_id, fio, university, faculty, group_name) или None.
-    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
@@ -1181,7 +1262,7 @@ def reject_application(app_id):
     cursor.execute("UPDATE starosta_applications SET status = 'rejected' WHERE id = ?", (app_id,))
     conn.commit()
     conn.close()
-    return row  # (user_id, fio)
+    return row
 
 
 def get_all_starostas():
@@ -1194,6 +1275,366 @@ def get_all_starostas():
         WHERE a.status = 'approved'
         ORDER BY a.university, a.faculty, a.group_name
     """)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+# ============ XP / РЕЙТИНГ ============
+
+def get_user_xp(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT xp, level, streak FROM user_xp WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return (0.0, 1, 0)
+    return row
+
+
+def get_group_rating(university, faculty, group_name, limit=10):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT u.user_id, u.full_name, COALESCE(x.xp, 0), COALESCE(x.level, 1)
+        FROM users u
+        LEFT JOIN user_xp x ON u.user_id = x.user_id
+        WHERE u.university = ? AND u.faculty = ? AND u.group_name = ?
+        ORDER BY COALESCE(x.xp, 0) DESC
+        LIMIT ?
+    """, (university, faculty, group_name, limit))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def reset_user_xp(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE user_xp SET xp = 0, level = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def reset_group_xp(university, faculty, group_name):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE user_xp SET xp = 0, level = 1
+        WHERE user_id IN (
+            SELECT user_id FROM users
+            WHERE university = ? AND faculty = ? AND group_name = ?
+        )
+    """, (university, faculty, group_name))
+    conn.commit()
+    conn.close()
+
+
+# ============ ПРОМОКОДЫ ============
+
+def create_promo_code(code, reward_xp=5, uses=10, created_by=0):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO promo_codes (code, reward_xp, uses_left, created_by)
+            VALUES (?, ?, ?, ?)
+        """, (code.upper(), reward_xp, uses, created_by))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def use_promo_code(user_id, code):
+    code = code.upper().strip()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT reward_xp, uses_left FROM promo_codes WHERE code = ?", (code,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return ("not_found", None)
+
+    reward_xp, uses_left = row
+    if uses_left <= 0:
+        conn.close()
+        return ("expired", None)
+
+    cursor.execute("SELECT id FROM promo_uses WHERE code = ? AND user_id = ?", (code, user_id))
+    if cursor.fetchone():
+        conn.close()
+        return ("already_used", None)
+
+    cursor.execute("INSERT INTO promo_uses (code, user_id) VALUES (?, ?)", (code, user_id))
+    cursor.execute("UPDATE promo_codes SET uses_left = uses_left - 1 WHERE code = ?", (code,))
+
+    cursor.execute("SELECT xp FROM user_xp WHERE user_id = ?", (user_id,))
+    xp_row = cursor.fetchone()
+    if xp_row:
+        new_xp = xp_row[0] + reward_xp
+        new_level = 1 + int(new_xp // 10)
+        cursor.execute("UPDATE user_xp SET xp = ?, level = ? WHERE user_id = ?",
+                       (new_xp, new_level, user_id))
+    else:
+        cursor.execute("""
+            INSERT INTO user_xp (user_id, xp, level) VALUES (?, ?, 1)
+        """, (user_id, reward_xp))
+
+    conn.commit()
+    conn.close()
+    return ("ok", reward_xp)
+
+
+def get_all_promo_codes():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT code, reward_xp, uses_left, created_at FROM promo_codes
+        ORDER BY created_at DESC LIMIT 50
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def delete_promo_code(code):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM promo_codes WHERE code = ?", (code.upper(),))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted > 0
+
+
+# ============ РЕФЕРАЛЫ ============
+
+def add_referral(referrer_id, referred_id):
+    if referrer_id == referred_id:
+        return False
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO referrals (referrer_id, referred_id)
+            VALUES (?, ?)
+        """, (referrer_id, referred_id))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def get_referral_count(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (user_id,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def get_referrer_for_user(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT referrer_id FROM referrals WHERE referred_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+# ============ СТАТИСТИКА ИГР ============
+
+def update_game_stat(user_id, game, won):
+    valid = {"hangman", "bulls", "tictactoe", "mines"}
+    if game not in valid:
+        return
+
+    games_col = f"{game}_games"
+    wins_col = f"{game}_wins"
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT user_id FROM games_stats WHERE user_id = ?", (user_id,))
+    if not cursor.fetchone():
+        cursor.execute("""
+            INSERT INTO games_stats (user_id) VALUES (?)
+        """, (user_id,))
+
+    if won:
+        cursor.execute(f"""
+            UPDATE games_stats SET {games_col} = {games_col} + 1,
+                                  {wins_col} = {wins_col} + 1
+            WHERE user_id = ?
+        """, (user_id,))
+    else:
+        cursor.execute(f"""
+            UPDATE games_stats SET {games_col} = {games_col} + 1
+            WHERE user_id = ?
+        """, (user_id,))
+
+    conn.commit()
+    conn.close()
+
+
+def get_game_stats(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT hangman_wins, hangman_games, bulls_wins, bulls_games,
+               tictactoe_wins, tictactoe_games, mines_wins, mines_games
+        FROM games_stats WHERE user_id = ?
+    """, (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return (0, 0, 0, 0, 0, 0, 0, 0)
+    return row
+
+
+# ============ БЭКАПЫ ============
+
+def backup_db():
+    from config import BACKUP_DIR
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    timestamp = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(BACKUP_DIR, f"backup_{timestamp}.db")
+    shutil.copy(DB_NAME, backup_path)
+    return backup_path
+
+
+def restore_db(uploaded_path):
+    if not os.path.exists(uploaded_path):
+        return False
+
+    try:
+        test_conn = sqlite3.connect(uploaded_path)
+        test_conn.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
+        test_conn.close()
+    except Exception:
+        return False
+
+    shutil.copy(uploaded_path, DB_NAME)
+    return True
+
+
+# ============ СТАТИСТИКА ПОСЕЩАЕМОСТИ ============
+
+def get_user_attendance_stats(user_id, days=30):
+    """
+    Возвращает статистику посещаемости юзера за N дней:
+    {
+        "total": int,
+        "will": int,
+        "absent": int,
+        "sick": int,
+        "late": int,
+        "percent": float,
+    }
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    from_date = (datetime.now(MSK) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    cursor.execute("""
+        SELECT status, COUNT(*)
+        FROM attendance
+        WHERE user_id = ? AND date >= ?
+        GROUP BY status
+    """, (user_id, from_date))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    stats = {"total": 0, "will": 0, "absent": 0, "sick": 0, "late": 0}
+
+    for status, count in rows:
+        if status in stats:
+            stats[status] = count
+        stats["total"] += count
+
+    if stats["total"] > 0:
+        good = stats["will"] + stats["sick"] + stats["late"]
+        stats["percent"] = round(good / stats["total"] * 100, 1)
+    else:
+        stats["percent"] = 0.0
+
+    return stats
+
+
+def get_absentees_streak(university, faculty, group_name, threshold=3):
+    """
+    Возвращает список юзеров с N+ пропусками ПОДРЯД (статус 'absent').
+    [ (user_id, full_name, streak), ... ]
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT user_id, full_name FROM users
+        WHERE university = ? AND faculty = ? AND group_name = ?
+    """, (university, faculty, group_name))
+    users = cursor.fetchall()
+
+    result = []
+
+    for user_id, full_name in users:
+        cursor.execute("""
+            SELECT status, date FROM attendance
+            WHERE user_id = ?
+            ORDER BY date DESC, id DESC
+            LIMIT 20
+        """, (user_id,))
+        rows = cursor.fetchall()
+
+        streak = 0
+        for status, _ in rows:
+            if status == "absent":
+                streak += 1
+            else:
+                break
+
+        if streak >= threshold:
+            result.append((user_id, full_name, streak))
+
+    conn.close()
+    return result
+
+
+def get_group_attendance_month(university, faculty, group_name, days=30):
+    """
+    Возвращает строки для CSV:
+    [ (date, full_name, pair_num, subject, status), ... ]
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    from_date = (datetime.now(MSK) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    cursor.execute("""
+        SELECT a.date, u.full_name, s.pair_number, s.subject, a.status
+        FROM attendance a
+        JOIN users u ON a.user_id = u.user_id
+        JOIN schedule s ON a.schedule_id = s.id
+        WHERE u.university = ? AND u.faculty = ? AND u.group_name = ?
+          AND s.university = ? AND s.faculty = ? AND s.group_name = ?
+          AND a.date >= ?
+        ORDER BY a.date DESC, u.full_name, s.pair_number
+    """, (
+        university, faculty, group_name,
+        university, faculty, group_name,
+        from_date,
+    ))
+
     rows = cursor.fetchall()
     conn.close()
     return rows
